@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">连桥 LinkBridge</string>
+    <string name="channel_sync">连桥服务</string>
+    <string name="channel_screen">屏幕共享</string>
+</resources>
