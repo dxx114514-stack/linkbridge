@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------- 构建 + 自动测试（Windows / Linux）----------------
+  test:
+    name: 构建与测试（${{ matrix.name }}）
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: Windows
+            os: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # ---- Linux：系统 OpenSSL + X11 开发包 ----
+      - name: 安装依赖（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libx11-dev
+
+      - name: 配置（Linux）
+        if: runner.os == 'Linux'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLB_BUILD_GUI=OFF
+
+      - name: 构建（Linux）
+        if: runner.os == 'Linux'
+        run: cmake --build build --parallel
+
+      - name: 测试（Linux）
+        if: runner.os == 'Linux'
+        run: ctest --test-dir build --output-on-failure
+
+      # ---- Windows：MSYS2 MinGW-w64（与本地开发工具链一致）----
+      - name: 安装 MSYS2 工具链（Windows）
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: 配置（Windows）
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLB_BUILD_GUI=OFF
+
+      - name: 构建（Windows）
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: cmake --build build
+
+      - name: 测试（Windows）
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: ctest --test-dir build --output-on-failure
+
+  # ---------------- 提交信息为 build: X.Y.Z 时创建 Release ----------------
+  release:
+    name: 创建 Release
+    needs: test
+    # 仅 main 分支推送、且提交标题形如 "build: 1.2.3" 时触发
+    if: |
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      startsWith(github.event.head_commit.message, 'build: ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: 检出代码（含完整历史与 tag）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 解析版本号
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          subject=$(git log -1 --pretty=%s)
+          echo "提交标题：$subject"
+          if [[ ! "$subject" =~ ^build:[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "提交标题不是 build: X.Y.Z 格式，跳过发布"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="${BASH_REMATCH[1]}"
+          if git rev-parse -q --verify "refs/tags/v${version}" > /dev/null; then
+            echo "tag v${version} 已存在，跳过发布"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: 生成变更说明（自上一个 release 以来的全部提交）
+        if: steps.ver.outputs.version != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          prev=$(git tag --merged HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)
+          if [ -n "$prev" ]; then
+            echo "上一个发布版本：$prev"
+            range="${prev}..HEAD"
+          else
+            echo "未找到历史发布 tag，收录全部提交"
+            range="HEAD"
+          fi
+          {
+            echo "自上一次发布以来的提交："
+            echo
+            git log "$range" --no-merges --pretty=format:'- %s (%h)'
+            echo
+          } > release-notes.md
+          echo "Release 说明："
+          cat release-notes.md
+
+      - name: 创建 Release
+        if: steps.ver.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.ver.outputs.version }}"
+          gh release create "v${version}" \
+            --title "v${version}" \
+            --notes-file release-notes.md \
+            --target "$GITHUB_SHA"

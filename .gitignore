@@ -38,6 +38,11 @@ debug.log
 # 独立仓库（Wiki）
 /wiki/
 
+# 本地依赖与构建缓存（不入库）
+/.deps/
+/build-gui/
+/.trae-html-share-packages/
+
 # 编辑器
 .idea/
 .vs/
