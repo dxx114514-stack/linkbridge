@@ -154,7 +154,7 @@ TEST(trust_store_encrypted_roundtrip) {
         }
     }
     // 落盘内容必须是密文，不应包含明文设备名
-    const std::string raw = dir + "\\trusted_devices.bin";
+    const std::string raw = dir + "/trusted_devices.bin";
     std::FILE* f = std::fopen(raw.c_str(), "rb");
     CHECK(f != nullptr);
     if (f) {

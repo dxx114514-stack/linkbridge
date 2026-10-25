@@ -19,9 +19,12 @@ constexpr std::uint8_t kFrameRequest = 0x63;
 constexpr std::uint8_t kFrame = 0x64;
 constexpr std::uint8_t kStop = 0x65;
 constexpr std::uint8_t kFailMsg = 0x66;
+constexpr std::uint8_t kInput = 0x67;
 
 constexpr size_t kFrameSlack = 4096;
+constexpr size_t kMaxQueuedInputs = 32;
 constexpr int kTokenBytes = 8; // 16 个 hex 字符
+constexpr int kDefaultSwipeMs = 200;
 
 std::uint32_t read_le32(const ByteBuf& b, size_t off) {
     return static_cast<std::uint32_t>(b[off]) | (static_cast<std::uint32_t>(b[off + 1]) << 8) |
@@ -37,17 +40,102 @@ std::string peer_name_of(const TrustRecord& record) {
     return record.name.empty() ? record.device_id : record.name;
 }
 
+// 把输入事件写入控制指令（token 之后的部分）。
+void write_input(ByteWriter& w, const ScreenInput& in) {
+    w.u8(static_cast<std::uint8_t>(in.type));
+    switch (in.type) {
+        case ScreenInputType::Tap:
+            w.u32(static_cast<std::uint32_t>(in.x1));
+            w.u32(static_cast<std::uint32_t>(in.y1));
+            break;
+        case ScreenInputType::Swipe:
+            w.u32(static_cast<std::uint32_t>(in.x1));
+            w.u32(static_cast<std::uint32_t>(in.y1));
+            w.u32(static_cast<std::uint32_t>(in.x2));
+            w.u32(static_cast<std::uint32_t>(in.y2));
+            w.u32(static_cast<std::uint32_t>(in.duration_ms > 0 ? in.duration_ms
+                                                               : kDefaultSwipeMs));
+            break;
+        case ScreenInputType::Key:
+            w.u8(static_cast<std::uint8_t>(in.key));
+            break;
+    }
+}
+
+// 读取控制指令；格式非法时返回 false。
+bool read_input(ByteReader& r, ScreenInput& out) {
+    const auto raw = r.u8();
+    if (!r.ok()) return false;
+    switch (static_cast<ScreenInputType>(raw)) {
+        case ScreenInputType::Tap:
+            out.type = ScreenInputType::Tap;
+            out.x1 = static_cast<int>(r.u32());
+            out.y1 = static_cast<int>(r.u32());
+            break;
+        case ScreenInputType::Swipe:
+            out.type = ScreenInputType::Swipe;
+            out.x1 = static_cast<int>(r.u32());
+            out.y1 = static_cast<int>(r.u32());
+            out.x2 = static_cast<int>(r.u32());
+            out.y2 = static_cast<int>(r.u32());
+            out.duration_ms = static_cast<int>(r.u32());
+            break;
+        case ScreenInputType::Key: {
+            out.type = ScreenInputType::Key;
+            const auto key = static_cast<ScreenKey>(r.u8());
+            if (key != ScreenKey::Back && key != ScreenKey::Home && key != ScreenKey::Recents)
+                return false;
+            out.key = key;
+            break;
+        }
+        default:
+            return false;
+    }
+    return r.ok();
+}
+
 } // namespace
+
+void ScreenInputQueue::push(const ScreenInput& input) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (items_.size() >= kMaxQueuedInputs) items_.pop_front();
+    items_.push_back(input);
+}
+
+bool ScreenInputQueue::pop(ScreenInput& out) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (items_.empty()) return false;
+    out = items_.front();
+    items_.pop_front();
+    return true;
+}
+
+void ScreenInputQueue::clear() {
+    std::lock_guard<std::mutex> lk(mu_);
+    items_.clear();
+}
+
+bool ScreenInputQueue::empty() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return items_.empty();
+}
+
+std::size_t ScreenInputQueue::size() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return items_.size();
+}
 
 ScreenService::ScreenService(const Identity& identity, TrustStore& trust, EventBus& events,
                              IDialer& dialer, const ScreenConfig& config,
-                             std::shared_ptr<IScreenCapture> capture, int connect_timeout_ms)
+                             std::shared_ptr<IScreenCapture> capture,
+                             std::shared_ptr<IScreenInput> input, int connect_timeout_ms)
     : identity_(identity),
       trust_(trust),
       events_(events),
       dialer_(dialer),
       config_(config),
       capture_(std::move(capture)),
+      input_(std::move(input)),
       connect_timeout_ms_(connect_timeout_ms) {}
 
 ScreenService::~ScreenService() { stop(); }
@@ -156,14 +244,26 @@ void ScreenService::serve(std::unique_ptr<ByteStream> stream) {
             return;
         }
     }
-    if (mode != "view") {
-        send_fail("远程控制未实现（v0 仅支持只读查看）");
+    if (mode != "view" && mode != "control") {
+        send_fail("不支持的屏幕会话模式");
+        stream->close();
+        return;
+    }
+    const bool control = mode == "control";
+    if (control && !input_) {
+        send_fail("本机未启用屏幕控制（Android 需开启无障碍服务）");
+        stream->close();
+        return;
+    }
+    // 自动接受（无人工确认）时，控制模式必须已显式授予“屏幕控制”权限。
+    if (control && auto_accept_ && (record->permissions & kPermScreenControl) == 0) {
+        send_fail("未授予屏幕控制权限");
         stream->close();
         return;
     }
 
     if (!auto_accept_ && config_.require_confirm_each_session &&
-        (!confirm_ || !confirm_(name, "view"))) {
+        (!confirm_ || !confirm_(name, control ? "control" : "view"))) {
         send_fail("用户拒绝或未配置确认处理器");
         stream->close();
         return;
@@ -183,12 +283,14 @@ void ScreenService::serve(std::unique_ptr<ByteStream> stream) {
     events_.publish(ScreenSessionStarted{peer, name});
 
     std::uint64_t frames = 0;
+    std::uint64_t inputs = 0;
     std::string reason = "对端断开";
     while (running_.load()) {
         auto req = seal_recv(*stream, keys, seq, kFrameSlack);
         if (!req) break;
 
         std::uint8_t type = 0;
+        ScreenInput input_event;
         {
             ByteReader r(*req);
             type = r.u8();
@@ -198,10 +300,29 @@ void ScreenService::serve(std::unique_ptr<ByteStream> stream) {
                 send_fail(reason);
                 break;
             }
+            if (type == kInput && !read_input(r, input_event)) {
+                reason = "控制指令格式非法";
+                send_fail(reason);
+                break;
+            }
         }
         if (type == kStop) {
             reason = "对端停止";
             break;
+        }
+        if (type == kInput) {
+            if (!control) {
+                reason = "会话模式不支持输入";
+                send_fail(reason);
+                break;
+            }
+            if (auto r = input_->inject(input_event); !r) {
+                reason = "输入注入失败: " + r.error;
+                send_fail(reason);
+                break;
+            }
+            ++inputs;
+            continue;
         }
         if (type != kFrameRequest) {
             reason = "协议错误";
@@ -238,13 +359,13 @@ void ScreenService::serve(std::unique_ptr<ByteStream> stream) {
     }
 
     std::fill(token.begin(), token.end(), '\0');
-    events_.publish(ScreenSessionEnded{peer, name, reason, frames});
+    events_.publish(ScreenSessionEnded{peer, name, reason, frames, inputs});
     stream->close();
 }
 
 Expected<ScreenViewResult> ScreenService::view(const DeviceId& peer,
                                               const std::string& output_dir,
-                                              int duration_ms) {
+                                              int duration_ms, ScreenInputQueue* input) {
     const auto record = trust_.get(peer);
     if (!record) return Expected<ScreenViewResult>::fail("目标设备不在信任库中");
     if ((record->permissions & kPermScreenShare) == 0)
@@ -273,7 +394,7 @@ Expected<ScreenViewResult> ScreenService::view(const DeviceId& peer,
     {
         ByteWriter w;
         w.u8(kView);
-        w.str("view");
+        w.str(input ? "control" : "view");
         if (auto r = seal_send(*stream, keys, seq, w.buf()); !r) {
             stream->close();
             return Expected<ScreenViewResult>::fail(r.error);
@@ -315,6 +436,20 @@ Expected<ScreenViewResult> ScreenService::view(const DeviceId& peer,
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration_ms);
 
     while (std::chrono::steady_clock::now() < deadline) {
+        if (input) {
+            ScreenInput event;
+            while (input->pop(event)) {
+                ByteWriter w;
+                w.u8(kInput);
+                w.str(token);
+                write_input(w, event);
+                if (auto r = seal_send(*stream, keys, seq, w.buf()); !r) {
+                    stream->close();
+                    return Expected<ScreenViewResult>::fail(r.error);
+                }
+                ++stats.inputs;
+            }
+        }
         {
             ByteWriter w;
             w.u8(kFrameRequest);

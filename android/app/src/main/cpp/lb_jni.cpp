@@ -313,7 +313,8 @@ void attach_event_forwarding(lb::Node& node) {
         j.str("type", "screen_session_ended")
             .str("peer", e.peer_name)
             .str("reason", e.reason)
-            .num("frames", static_cast<long long>(e.frames));
+            .num("frames", static_cast<long long>(e.frames))
+            .num("inputs", static_cast<long long>(e.inputs));
         emit(j.done());
     }));
     subs.push_back(ev.subscribe<ScreenFailed>([](const ScreenFailed& e) {

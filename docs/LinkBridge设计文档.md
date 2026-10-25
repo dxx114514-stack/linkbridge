@@ -304,6 +304,8 @@ mode=view：VNC 服务端以只读方式运行（忽略一切输入事件）；m
 "锁定"（B 主动暂停输入但保持画面）：B 发送 SessionPauseInput，A 端输入事件被服务端丢弃
 ```
 
+v0.1 落地：不使用 VNC，屏幕通道在同一 STS 加密连接上以 `VIEW / ACCEPT / FRAME_REQUEST / FRAME / INPUT / STOP` 承载。`mode=control` 时查看端可发送 `INPUT`（单击 / 滑动 / 系统按键），被控端必须具备输入注入后端（`IScreenInput`；Android 通过无障碍服务注入，Windows/Linux 暂未实现），否则会话直接拒绝。控制权限与只读权限分离：无人值守（`auto_accept`）时要求信任记录含 `kPermScreenControl`，否则仍走每会话确认；确认文案区分“只读查看”与“远程控制”。
+
 ### 5.6 文件夹同步
 
 ```
@@ -661,7 +663,9 @@ SyncFolderGrant {
 | 剪贴板同步（事件驱动 + 2s 兜底轮询、500ms 去抖、哈希去重、回环抑制） | 已实现 |
 | 剪贴板文本（UTF-8）与图片（CF_DIB/CF_DIBV5）双向同步 | 已实现 |
 | 剪贴板 `auto`/`confirm` 策略、`max_bytes` 上限、敏感内容跳过（Windows） | 已实现 |
-| 只读屏幕共享（VIEW/ACCEPT/FRAME_REQUEST/FRAME/STOP，会话令牌绑定、`max_fps` 限速、单帧 `max_bytes` 上限） | 已实现 |
+| 屏幕共享（VIEW/ACCEPT/FRAME_REQUEST/FRAME/STOP，会话令牌绑定、`max_fps` 限速、单帧 `max_bytes` 上限） | 已实现 |
+| 屏幕控制模式（`mode=control` + `INPUT` 指令：单击/滑动/系统按键，被控端按帧节奏注入，队列上限 32 条） | 已实现（Android 被控端注入可用；Windows/Linux 作为被控端暂不支持） |
+| 屏幕控制授权（`kPermScreenControl` 与 `kPermScreenShare` 分离；无人值守时必须显式授予控制权限） | 已实现 |
 | Windows 屏幕采集（GDI 虚拟桌面 `BitBlt`，输出 32 位 top-down DIB） | 已实现 |
 | 查看端落盘最新帧为 BMP（控制台无 GUI，`latest.bmp`） | 已实现 |
 | 屏幕共享权限校验（`kPermScreenShare`）+ 每会话确认 + 会话开始/结束事件 | 已实现 |
@@ -679,7 +683,7 @@ SyncFolderGrant {
 | `[sync]` 配置（`enabled` / `folder` / `mode` / `ignore` / `max_file_size_mb` / `rescan_interval_sec` / `default_conflict_policy` / `max_concurrent_files` / `trash_enabled` / `version_keep_count` / `version_keep_days` / `trash_max_mb` / `rate_limit_kbps`）与 `sync_port` 校验 | 已实现 |
 | 同步权限校验（`kPermSync`）与 `SyncStarted` / `SyncCompleted` / `SyncFailed` 事件 | 已实现 |
 | 控制台 CLI（init / show / devices / code / pair / send / clip / screen / sync / daemon） | 已实现 |
-| 单元测试 55 例 + 真实 TCP 端到端 125 项 | 全部通过 |
+| 单元测试 55 例 + 真实 TCP 端到端 137 项（含屏幕控制授权/注入用例） | 全部通过（Windows 与 WSL Linux） |
 | M8 Android 工程骨架（Gradle Kotlin DSL + AGP 8.5.2 + Kotlin 1.9.24 + Compose BOM 2024.06.00 + `externalNativeBuild`） | 已实现（Gradle 9.4.1 构建 `assembleDebug` 通过；MuMu 12 模拟器上服务启动与 UI 验证通过） |
 | M8 NDK 构建（根 `CMakeLists.txt` 以 `LB_PLATFORM=android` 分支，`android/app/src/main/cpp/CMakeLists.txt` 引入核心库并产出 `lbcore_jni`） | 已实现 |
 | M8 POSIX 传输（`src/net/tcp_posix.cpp`，4 字节大端长度帧、`SO_RCVTIMEO/SO_SNDTIMEO`、`MSG_NOSIGNAL`，与 Windows 语义一致） | 已实现 |
@@ -692,6 +696,7 @@ SyncFolderGrant {
 | M8 FileObserver 同步监听（递归注册目录监听 + 原生 `nativeOnChange(handle)` 回调动量扫描） | 已实现 |
 | M8 Android 加密原语（JCA：`MessageDigest`/`Mac`/`Cipher`/`Signature`/`KeyAgreement`，HKDF 仍为纯 C++） | 已实现 |
 | M8 Android Keystore（`SecretStore` AES-256-GCM，`iv(12)+ct+tag(16)`）与剪贴板桥（`ClipboardBridge` 文本读写 + `OnPrimaryClipChangedListener` 轮询序号） | 已实现 |
+| M8 Android 无障碍屏幕控制（`LinkBridgeAccessibilityService` + `InputBridge`；`canPerformGestures`，`dispatchGesture` 实现点击/滑动，`performGlobalAction` 实现返回/主页/最近任务；JNI 入口 `inject(IIIIII)Z`） | 已实现（`gradle :app:assembleDebug` 构建通过；尚未在设备上启用服务做注入验证） |
 
 ### A.2 关键差异与替代原因
 
@@ -703,7 +708,7 @@ SyncFolderGrant {
 | libssh 文件通道 / SFTP（§3.4） | STS 加密业务通道（独立端口 45713）+ 自研 OFFER/ACCEPT/CHUNK/ACK/DONE | 构建环境无 libssh。断点续传（`.lbpart` 前缀）、块级 CRC32C、整文件 SHA-256、进度/取消语义均按基线保留；`TransferService` 接口不变，后续可换成 SFTP 承载。远程文件管理（§3.5）仍待实现。 |
 | 剪贴板经 SSH 通道、图片用 PNG（§5.4） | 独立 STS 加密通道（`clipboard_port`，默认 45714）；图片传原始 DIB | 无 libssh 且无 PNG 编解码依赖。DIB 仅适用于 Windows 双端；`ClipboardContent` 以 mime 标识类型，后续可增加 `image/png` 编解码而不改动同步逻辑。 |
 | 剪贴板变化事件（§5.4） | Win32 `WM_CLIPBOARDUPDATE` + `AddClipboardFormatListener`，2s 超时兜底轮询 | 与设计一致；事件唤醒 + 兜底轮询兼顾实时性与丢失通知的容错。 |
-| VNC 屏幕通道（§5.5） | 独立 STS 加密通道（`screen_port`，默认 45715）+ 自研 VIEW/FRAME_REQUEST/FRAME 协议；查看端把最新帧写为 BMP | 构建环境无 libssh / LibVNCServer / LibVNCClient。只读由协议天然保证（无任何输入注入指令）；`ScreenService` 与 `IScreenCapture` 接口不变，后续可替换为 VNC/PNG 承载。远程控制（键鼠注入）尚未实现。 |
+| VNC 屏幕通道（§5.5） | 独立 STS 加密通道（`screen_port`，默认 45715）+ 自研 VIEW/FRAME_REQUEST/FRAME 协议；查看端把最新帧写为 BMP | 构建环境无 libssh / LibVNCServer / LibVNCClient。协议在 v0.1 追加 `INPUT` 指令（单击 / 滑动 / 系统按键），控制模式需被控端具备 `IScreenInput` 后端；Android 以无障碍服务 `dispatchGesture` / `performGlobalAction` 实现注入，Windows（`SendInput`）与 Linux（XTest）被控端注入尚未实现，返回空后端使控制会话被明确拒绝。`ScreenService` / `IScreenCapture` / `IScreenInput` 接口不变，后续可替换为 VNC/PNG 承载。 |
 | SQLite 索引（§9.3） | 自研 `LBS2` 二进制索引（相对路径 + 大小 + mtime + SHA-256 + 冲突标记 + 墓碑） | 环境无 SQLite；当前条目上限 20 万，按路径线性查找足够。规模增长后把 `SyncIndex` 存储层替换为 SQLite/SQLCipher 即可，不影响同步逻辑。 |
 | libssh/SFTP 承载同步（§3.4） | 独立 STS 加密通道（`sync_port`，默认 45716）+ 自研清单/计划/块传输 | 与文件互传同源，复用 STS 双向认证与 AES-GCM 分帧；`SyncService` 接口不变，后续可换 SFTP 或基于版本库的增量协议。 |
 | `.stignore` 文件（多行规则） | 配置项 `[sync].ignore` 逗号分隔字符串 | TOML 子集不支持数组；匹配语义保留 `*`（不跨 `/`）、`**`（跨层级，含零层级）、`?`、尾随 `/` 目录前缀、`!` 取反。 |
@@ -724,7 +729,7 @@ SyncFolderGrant {
 
 - Windows：CNG（SHA-256 / HMAC / HKDF / AES-GCM / ECDSA / ECDH）+ DPAPI + Winsock2 + GetAdaptersAddresses + Win32 Clipboard API（CF_UNICODETEXT / CF_DIB / CF_DIBV5，`WM_CLIPBOARDUPDATE` 监听，敏感标记过滤）+ GDI 屏幕采集（虚拟桌面 `BitBlt`，32 位 top-down DIB）+ `ReadDirectoryChangesW` 递归文件监听（OVERLAPPED）。已编译并通过全部单元/端到端测试。
 - Android：`src/pal/android/` 提供 JNI 环境管理（`android_jni.cpp`：`JavaVM` 缓存、线程 attach/detach、类引用缓存）、路径注入（`android_paths.cpp`：`android_set_paths` / `primary_mac` / `local_ip_for`）、JCA 加密（`android_crypto.cpp`）、Keystore 保护的主密钥（Kotlin `SecretStore`）、剪贴板（Kotlin `ClipboardBridge`）、屏幕采集（Kotlin `ScreenCaptureBridge`，MediaProjection → DIB）与文件监听（Kotlin `SyncFileObserver` 递归注册 + `nativeOnChange`）。`android/` 为完整 Gradle 工程（Compose UI + `LinkBridgeService` + `ScreenShareService` + `HeartbeatWorker`），JNI 桥为 `lbcore_jni`。已在本地以 Gradle 9.4.1 + JDK 25 + AGP 8.5.2、SDK 34 / build-tools 34.0.0 / NDK 26.3.11579264 / CMake 3.22.1 执行 `gradle assembleDebug` 成功，产出 `android/app/build/outputs/apk/debug/app-debug.apk`，内含 `arm64-v8a` / `armeabi-v7a` / `x86_64` 三个 ABI 的 `liblbcore_jni.so` 与 `libc++_shared.so`。已在 MuMu 12 模拟器（Android 12 / SDK 32 / x86_64）实机运行：安装启动后 `Node::create`/`start()` 成功，生成 `identity.key`/`identity.name`/`linkbridge.toml`/`inbox`/`sync`，6 个业务端口（45710 配对、45711 心跳、45713 传输、45714 剪贴板、45715 屏幕、45716 同步）均已监听；`LinkBridgeService` 以前台服务（`isForeground=true`，通知渠道 `linkbridge_sync`）存活，Compose 主界面显示“服务运行中”、设备名、设备 ID 与指纹。随后与 Windows 控制台节点完成跨端联调：配对（UI 确认弹窗接受，Windows 端记录 `V2284A` 指纹）、Windows→Android 文件互传（`files/inbox/hello.txt` 内容一致 38 B）、剪贴板推送（确认后写入系统剪贴板，粘贴验证通过）、文件夹同步（含 `docs/` 子目录共 3 个文件 55 B，内容一致）、只读屏幕共享（12 秒接收 5 帧 1920×1080 BMP，非黑屏）均通过；`LinkBridgeService` 与 `ScreenShareService` 两个前台服务同时存活。MuMu 为 QEMU NAT（guest `wlan0=10.0.2.15`，宿主不可直连），联调经 `adb forward tcp:45710 tcp:45710` 建立通道，Windows 侧信任库记录对端 IP 为 `127.0.0.1`；因此 Android 主动发起（UI“立即同步/推送剪贴板”回连 Windows）与心跳在线状态需在真机或局域网环境补验。
-- Linux：`src/pal/` 目前仅有 Windows 与 Android 实现；`crypto.h`、`platform.h`、`ByteStream`、`IDialer`、`IClipboardBackend`、`IScreenCapture`、`IFileWatcher` 已抽象，且 `src/net/tcp_posix.cpp` 已覆盖 POSIX socket，新增 `src/pal/linux/`（OpenSSL + Keyring + X11/Wayland 剪贴板 + PipeWire/X11 抓屏 + inotify）即可复用全部核心逻辑。
+- Linux：`src/pal/linux/` 已实现完整适配层——OpenSSL 3.5（ECDSA P-256 / ECDH / HKDF / AES-256-GCM）、基于 `machine-id` 派生密钥的密文存储（`secret_store.cpp`）、X11 剪贴板（`x11_clipboard.cpp`，UTF8_STRING/STRING 文本）、X11 抓屏（`x11_screen.cpp`，`XGetImage` → 40 字节 `BITMAPINFOHEADER` + 32 位 BGRA top-down DIB）、inotify 递归文件监听（`inotify_watcher.cpp`）、POSIX 路径/网络信息（`posix_paths.cpp`），并复用 `src/net/tcp_posix.cpp`。已在 WSL（Ubuntu 26.04，glibc 2.43 / GCC 15.2）以无 root 方式（`apt-get download` + `dpkg-deb -x` 到 `~/lb-sysroot`）编译通过 `linkbridge`、`lb_tests`、`lb_e2e`、`linkbridge-gui`，55 个单元用例与端到端测试全部通过。
 
 ### A.4 已知限制
 
@@ -736,14 +741,14 @@ SyncFolderGrant {
 6. 文件传输使用独立端口 `transfer_port`（默认 45713），剪贴板使用 `clipboard_port`（默认 45714），屏幕共享使用 `screen_port`（默认 45715），文件夹同步使用 `sync_port`（默认 45716），配对时随设备信息通告；SSH 端口 45712 仍为后续远程文件通道预留。
 7. 续传仅按 `.lbpart` 文件长度确定前缀偏移，前缀内容不单独校验；最终整文件 SHA-256 校验兜底，失败会删除临时文件。
 8. 对端 IP 变更后需重新配对：心跳探测不刷新信任库中的 `last_ip`，`send` 与剪贴板推送依赖配对时记录的地址与端口。
-9. 剪贴板目前仅支持 UTF-8 文本与 Windows 原始 DIB 图片；不支持文件列表、HTML 等格式，跨平台图片互通需后续引入 PNG 编解码。
+9. 剪贴板目前仅支持 UTF-8 文本与 Windows 原始 DIB 图片；不支持文件列表、HTML 等格式，跨平台图片互通需后续引入 PNG 编解码。Linux 侧（X11）仅实现文本（UTF8_STRING/STRING），`image/dib` 读写返回失败，与 Windows 互传图片暂不可用。
 10. 本地剪贴板自动同步要求两端均运行 `daemon`；`clip push` 可直接推送，但要求信任库中已记录对端 IP（即至少完成过一次心跳或配对）。
 11. 敏感内容过滤（`ExcludeClipboardContentFromMonitorProcessing`、`CanIncludeInClipboardHistory == 0`）仅在 Windows 生效；远端写入会覆盖本地剪贴板，`confirm` 模式无确认处理器时默认拒绝。
 12. 同一台机器上同时运行两个节点时共享系统剪贴板，依赖哈希去重与 5s 回环窗口避免写入风暴；正常部署为不同主机，不受影响。
-13. 屏幕共享为 v0 只读实现：协议无键鼠注入指令，`mode=control` 会被拒绝；后续远程控制需另立通道并补齐输入注入与“锁定输入”语义。
-14. 控制台版本无 GUI 渲染，查看端仅把最新帧写为 `latest.bmp` 并输出统计；UI 客户端可直接订阅 `ScreenFrameReceived` 或读取该文件。
+13. 屏幕会话分 `view` 与 `control` 两种模式：同一加密通道内新增 `INPUT`（单击/滑动/系统按键），不另开端口。控制模式要求被控端具备 `IScreenInput`：Android 通过无障碍服务（`LinkBridgeAccessibilityService` + `InputBridge`，`canPerformGestures`）注入，Windows/Linux 的 `make_system_screen_input()` 返回空后端，因此作为被控端时控制请求会被明确拒绝。授权上 `kPermScreenControl` 与 `kPermScreenShare` 分离：无人值守必须显式授予控制权限，否则走每会话确认（文案区分查看/控制）。输入坐标使用被控端画面像素，GUI 侧由缩放预览反算；“锁定输入”（暂停注入但保留画面）尚未实现。
+14. 桌面 GUI 已落地（`linkbridge-gui`，wxWidgets 3.2：Windows 原生 Win32 控件 / Linux GTK3 控件），控制台 `linkbridge` 保留全部命令；屏幕查看仍把最新帧写为 `latest.bmp`，GUI 的「屏幕共享」页复用同一落盘结果。
 15. 帧格式为原始 32 位 DIB（非 PNG），单帧体积约为宽×高×4 字节；`[screen].max_bytes` 默认 16 MiB，约覆盖到 2560×1440，4K 桌面需调高至 64 MiB。`max_fps` 默认 2，避免带宽与 CPU 峰值。
-16. 采集依赖交互式桌面：锁屏、UAC 安全桌面、无会话的服务上下文下 `BitBlt` 可能得到黑屏或失败；跨平台抓屏需新增 `IScreenCapture` 实现。
+16. 采集依赖交互式桌面：锁屏、UAC 安全桌面、无会话的服务上下文下 `BitBlt` 可能得到黑屏或失败；Linux 侧以 X11 `XGetImage` 实现，Wayland 原生会话需以 `GDK_BACKEND=x11`/XWayland 运行，纯 Wayland 无 X 服务时抓屏不可用。
 17. `screen view` 需要两端信任库已记录对端 `screen_port` 与 `last_ip`；信任库/配对信息由 `LBT4` 起携带屏幕端口，旧库需重新配对。
 18. 仍为单文件夹实现：每端只同步 `[sync].folder` 指定的一个目录；`folder` 变更等同于重新建立索引，旧索引会被新一轮扫描覆盖。
 19. 同步模式需两端一致（`send_receive` / `send_only` / `receive_only` / `mirror`）；握手时若模式不一致直接拒绝，避免“单方认为只收/只发”造成数据错乱。
@@ -762,3 +767,82 @@ SyncFolderGrant {
 32. Android 同步目录固定为应用私有目录 `<filesDir>/sync`，无法直接选中 `/sdcard` 等外部共享目录；接入 SAF/MediaStore 需后续版本。`FileObserver` 不递归，新增子目录在下一次全量扫描时补注册，期间变更依赖定时扫描兜底。
 33. Android 私钥未直接放入 Keystore：核心持有的 PKCS#8 私钥 blob 由 `SecretStore`（Keystore 主密钥 + AES-GCM）加密落盘，安全性依赖应用沙箱与 Keystore 不可导出主密钥；若需“私钥永不离开 TEE”，需新增 `ISecureStorage` 抽象。
 34. 确认请求（屏幕共享/配对/`confirm` 剪贴板）在 Android 端经 `NativeBridge.onNativeEvent` 投递 `confirm_request`，UI 需在前台响应；60 秒无响应视为拒绝。服务停止时 `cancel_all_confirms` 统一拒绝所有在途确认，避免核心线程阻塞。
+35. Android 作为被控端需在“设置 → 无障碍”中手动启用「连桥屏幕控制」服务（系统不允许应用自行开启）。服务声明 `canRetrieveWindowContent="false"`，只注入手势与系统按键，不读取屏幕内容；未启用时 `InputBridge.isReady()` 为 false，控制会话在握手阶段即被拒绝并回传“本机未启用屏幕控制（Android 需开启无障碍服务）”。应用内“屏幕控制（无障碍）”区块提供跳转设置与状态刷新。启用后任何已获授权（`kPermScreenControl`）或经每会话确认的对端均可注入输入，建议仅在可信网络使用并保持 `require_confirm_each_session = true`。
+
+## 附录 B：跨平台桌面 GUI（wxWidgets 3.2）
+
+### B.1 框架选型
+
+| 候选 | 结论 | 原因 |
+|---|---|---|
+| wxWidgets 3.2 | **采用** | 控件在各平台映射为原生实现（Win32 / GTK3），C++17/20 直接集成现有核心；Windows 7+ 可用（工程定义 `_WIN32_WINNT=0x0601`，`PrintWindow` 按 `PW_RENDERFULLCONTENT`→0 回退），Linux 发行版均有 `libwxgtk3.2-dev` 包 |
+| Qt 5.15 | 排除 | 本机构建环境无 MSVC；`mingw81` 版不支持 C++20 `std::format` |
+| Qt 6 | 排除 | 仅支持 Windows 10+，不满足“Windows 7 及以上”要求 |
+| 原生 Win32 + GTK 两套代码 | 排除 | 双份 UI 与交互逻辑，维护成本高且易行为漂移 |
+
+### B.2 代码结构
+
+| 文件 | 职责 |
+|---|---|
+| `src/gui/gui_app.cpp` | `wxApp` 入口、命令行参数（`--page` / `--screenshot` / `--exit-after-ms` / `--cycle`）、截图与资源统计、退出时停止核心服务 |
+| `src/gui/gui_controller.cpp` | `NodeController`：包装 `lb::Node` 生命周期（创建/启动/停止）、把核心事件序列化为 GUI 事件、`wxEvtHandler` 线程安全投递（`CallAfter`）、确认请求转对话框回调 |
+| `src/gui/gui_frame.cpp` | `MainFrame`：菜单（文件/服务/帮助）、导航列表、`wxSimplebook` 页面容器、状态栏、`--screenshot` 抓屏实现（Windows `PrintWindow`；其他平台 `wxScreenDC`） |
+| `src/gui/gui_panels.h` | 各页面类声明与共享事件定义 |
+| `src/gui/gui_panels_basic.cpp` | 概览、设备、配对、设置 |
+| `src/gui/gui_panels_tools.cpp` | 文件传输、剪贴板、屏幕共享 |
+| `src/gui/gui_panels_sync.cpp` | 文件夹同步（状态/冲突/版本历史）、帮助 |
+| `src/gui/gui_util.h` | 字符串编码（`W()` = `wxString::FromUTF8`）、时间与大小格式化 |
+| `src/gui/linkbridge.rc` | Windows 资源（`wx/msw/wx.rc`，含 comctl32 v6 清单以保证原生主题控件） |
+
+集成原则：GUI 只调用 `lb::Node` 与 `NodeController` 的公开接口，不改动核心层；所有核心回调经 `CallAfter` 回到 UI 线程，避免跨线程直接操作控件。
+
+### B.3 页面与操作
+
+| 页面 | 主要操作 |
+|---|---|
+| 概览 | 服务启动/停止（`F5`/`F6`）、身份与指纹、六个通道端口、运行统计、数据目录、活动日志 |
+| 设备 | 受信任设备列表（状态/IP/权限）、移除设备、刷新 |
+| 配对 | 生成 6 位配对码（含倒计时）、输入对端 IP 与码发起配对、接收侧指纹确认对话框 |
+| 文件传输 | 目标设备、本地文件选择、远端文件名、发送进度与历史 |
+| 剪贴板 | 读取本地剪贴板、输入文本推送到指定设备或全部在线设备 |
+| 屏幕共享 | 选择目标与查看时长、开始/停止、最新帧 `screen/latest.bmp`、本地屏幕预览 |
+| 文件夹同步 | 同步状态、立即同步、打开同步文件夹、冲突三选一（保留本地/副本/两者）、版本历史与恢复 |
+| 设置 | 设备名、通道端口、剪贴板模式、屏幕与同步参数，保存并重载配置 |
+| 帮助 | 内嵌完整操作指引（快速开始、文件传输、剪贴板、屏幕共享、同步、常见问题），无需额外文档 |
+
+布局要点：左侧导航 + 右侧 `wxSimplebook`；内容使用 `wxBoxSizer`/`wxFlexGridSizer` 与 `wxEXPAND` 标志，窗口缩放时表格与文本框自动伸展；粗体标题、分组框与状态栏符合各平台原生视觉（Windows 主题控件 / GTK3 Adwaita）。
+
+### B.4 构建
+
+Windows（MinGW-w64 + Ninja，wx 3.2.6 静态库位于 `.deps/wx-build`）：
+
+```powershell
+cmake -G Ninja -S . -B build-gui -DCMAKE_BUILD_TYPE=Release
+cmake --build build-gui
+# 产物：build-gui\linkbridge-gui.exe、build-gui\linkbridge.exe、build-gui\lb_tests.exe
+```
+
+Linux（发行版 wx 共享库）：
+
+```bash
+# 有 root：sudo apt install cmake ninja-build g++ libssl-dev libwxgtk3.2-dev
+# 无 root：apt-get download 上述 -dev/-headers 包后用 dpkg-deb -x 解到 ~/lb-sysroot
+cmake -G Ninja -S . -B ~/lb-build -DCMAKE_BUILD_TYPE=Release
+cmake --build ~/lb-build
+```
+
+`CMakeLists.txt` 在 Linux 分支自动探测 `${HOME}/lb-sysroot`，设置 `OPENSSL_ROOT_DIR`、wx 头文件/共享库路径、`-Wl,-rpath-link` 与 `BUILD_RPATH`；可用 `-DLB_SYSROOT=` 或 `-DLB_WX_GTK_ROOT=` 显式指定。若 wx 缺失则 `LB_BUILD_GUI` 自动关闭并给出警告，核心库与 CLI 仍可构建。
+
+### B.5 验证结果
+
+- Windows：`linkbridge-gui --screenshot` 抓取 9 个页面全部成功（21–44 KB PNG），中文与导航渲染正常；`--cycle 40` 连续创建/销毁主窗口 40 次，`GetGuiResources` 仅一次性 +7 GDI / −1 USER，私有内存一次性 +约 0.8 MB，无逐周期增长。
+- Linux（WSL Ubuntu 26.04 + Xvfb 1280×800×24）：55 个单元用例、端到端测试全部通过；9 个页面 `--screenshot` 全部成功（41–166 KB PNG），中文、GTK3 原生控件、表格与状态栏渲染正常；`--cycle 20` 退出码 0，常驻内存稳定在 128 MB（127.98–128.16 MB 区间波动，无单调增长）。
+- 抓屏说明：Linux 下 `wxScreenDC` 在 Xvfb/WSLg 的合成器环境下可能取到空白画面，验证时使用 Xvfb（无合成器）以保证像素真实；Wayland 原生会话同样建议 `GDK_BACKEND=x11`。
+
+### B.6 Linux 平台限制
+
+1. 剪贴板仅文本（X11 `UTF8_STRING`/`STRING`），图片（`image/dib`）读写返回失败；敏感内容标记过滤仅 Windows 实现。
+2. 抓屏基于 X11 `XGetImage`，纯 Wayland 无 X 服务时不可用；多显示器按 X 根窗口整体抓取。
+3. 私钥与信任库加密密钥由 `/etc/machine-id`（回退 dbus machine-id → hostname）与 uid 派生，换机或重建 systemd machine-id 后需重新配对。
+4. 无 GTK3 开发包时 GUI 自动跳过；CLI 与测试不依赖 wx。
+

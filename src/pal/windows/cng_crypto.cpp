@@ -8,8 +8,9 @@
 #include <algorithm>
 #include <cstring>
 
+// 旧 SDK/以 Win7 为目标编译时头文件不声明该宏；CNG 识别的 KDF 名是 "TRUNCATE"。
 #ifndef BCRYPT_KDF_RAW_SECRET
-#define BCRYPT_KDF_RAW_SECRET L"RAW_SECRET"
+#define BCRYPT_KDF_RAW_SECRET L"TRUNCATE"
 #endif
 
 namespace lb::crypto {

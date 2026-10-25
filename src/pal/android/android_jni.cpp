@@ -17,6 +17,7 @@ constexpr const char* kBridgeClasses[] = {
     "com/linkbridge/app/SecretStore",
     "com/linkbridge/app/ClipboardBridge",
     "com/linkbridge/app/ScreenCaptureBridge",
+    "com/linkbridge/app/InputBridge",
     "com/linkbridge/app/SyncFileObserver",
     "com/linkbridge/app/NativeBridge",
 };

@@ -77,4 +77,7 @@ std::shared_ptr<IScreenCapture> make_system_screen_capture() {
     return std::make_shared<SystemScreenCapture>();
 }
 
+// Windows 侧暂未实现输入注入（SendInput 需另行设计回环坐标映射），控制模式不可用。
+std::shared_ptr<IScreenInput> make_system_screen_input() { return nullptr; }
+
 } // namespace lb

@@ -27,9 +27,10 @@ struct NodeOptions {
     std::string data_dir;
     AppConfig config;
     std::string device_name;
-    // 测试/UI 可注入剪贴板与屏幕采集后端；为空时使用系统实现
+    // 测试/UI 可注入剪贴板与屏幕采集/输入后端；为空时使用系统实现
     std::shared_ptr<IClipboardBackend> clipboard_backend;
     std::shared_ptr<IScreenCapture> screen_capture;
+    std::shared_ptr<IScreenInput> screen_input;
 };
 
 class Node {

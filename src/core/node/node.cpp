@@ -54,9 +54,12 @@ Expected<std::unique_ptr<Node>> Node::create(const NodeOptions& options) {
         options.screen_capture ? options.screen_capture : make_system_screen_capture();
     if (!screen_capture)
         return Expected<std::unique_ptr<Node>>::fail("屏幕采集后端初始化失败");
+    std::shared_ptr<IScreenInput> screen_input =
+        options.screen_input ? options.screen_input : make_system_screen_input();
     node->screen_ = std::make_unique<ScreenService>(
         *node->identity_, *node->trust_store_, node->events_, *node->dialer_,
-        node->config_.screen, screen_capture, node->config_.network.connect_timeout_ms);
+        node->config_.screen, screen_capture, screen_input,
+        node->config_.network.connect_timeout_ms);
 
     node->sync_ = std::make_unique<SyncService>(*node->identity_, *node->trust_store_,
                                                 node->events_, *node->dialer_,

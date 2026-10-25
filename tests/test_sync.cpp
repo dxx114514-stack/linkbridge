@@ -141,7 +141,7 @@ TEST(sync_mode_parse) {
 
 TEST(sync_index_roundtrip) {
     const std::string dir = make_temp_dir("index");
-    const std::string path = dir + "\\sync_index.bin";
+    const std::string path = dir + "/sync_index.bin";
 
     SyncIndex idx;
     CHECK(idx.load(path).has_value()); // 不存在时为空索引
@@ -438,7 +438,7 @@ TEST(sync_plan_mode_delete_propagation) {
 
 TEST(sync_version_store_archive_and_restore) {
     const std::string dir = make_temp_dir("versions");
-    const std::string file = dir + "\\a.txt";
+    const std::string file = dir + "/a.txt";
     write_file(file, "v1");
 
     VersionStore store(dir, 5, 30, 1024);
@@ -469,7 +469,7 @@ TEST(sync_version_store_prune_count_and_days) {
     const std::int64_t base = 1790000000;
 
     for (int i = 0; i < 3; ++i) {
-        write_file(dir + "\\a.txt", "v" + std::to_string(i));
+        write_file(dir + "/a.txt", "v" + std::to_string(i));
         CHECK(store.archive("a.txt", base + i).success);
     }
     store.prune(base + 10);

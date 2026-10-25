@@ -43,6 +43,8 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
+    private var accessibilityEnabled by mutableStateOf(false)
+
     private val projectionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val data = result.data
@@ -69,9 +71,19 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
-                LinkBridgeScreen(onShareScreen = ::requestScreenShare)
+                LinkBridgeScreen(
+                    accessibilityEnabled = accessibilityEnabled,
+                    onShareScreen = ::requestScreenShare,
+                    onOpenAccessibility = { InputBridge.openSettings(this) },
+                    onRefreshAccessibility = { accessibilityEnabled = InputBridge.isEnabled(this) },
+                )
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        accessibilityEnabled = InputBridge.isEnabled(this)
     }
 
     private fun requestScreenShare() {
@@ -82,7 +94,12 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LinkBridgeScreen(onShareScreen: () -> Unit) {
+private fun LinkBridgeScreen(
+    accessibilityEnabled: Boolean,
+    onShareScreen: () -> Unit,
+    onOpenAccessibility: () -> Unit,
+    onRefreshAccessibility: () -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -231,6 +248,24 @@ private fun LinkBridgeScreen(onShareScreen: () -> Unit) {
                 OutlinedButton(onClick = { ScreenShareService.stop(context) }) { Text("停止共享") }
             }
 
+            Text("屏幕控制（无障碍）", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (accessibilityEnabled)
+                    "无障碍服务已启用：已配对设备在每次会话确认后可注入触摸与按键。"
+                else
+                    "无障碍服务未启用：其他设备暂时无法控制本机屏幕。",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onOpenAccessibility) { Text("打开无障碍设置") }
+                OutlinedButton(onClick = onRefreshAccessibility) { Text("刷新状态") }
+            }
+            Text(
+                "启用步骤：设置 → 无障碍 → 已下载的应用 → 连桥 LinkBridge → 打开。" +
+                    "本服务只用于输入注入（手势与返回/主页/最近任务），不读取屏幕内容或文本。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+
             if (conflicts.isNotEmpty()) {
                 Text("未解决冲突", style = MaterialTheme.typography.titleMedium)
                 conflicts.forEach { conflict ->
@@ -269,7 +304,9 @@ private fun LinkBridgeScreen(onShareScreen: () -> Unit) {
                     when (request.optString("kind")) {
                         "pairing" -> "配对请求\n指纹: ${request.optString("fingerprint")}"
                         "clipboard" -> "剪贴板内容（${request.optString("detail")}）\n预览: ${request.optString("fingerprint")}"
-                        "screen" -> "对方请求只读查看你的屏幕"
+                        "screen" -> if (request.optString("detail") == "control")
+                            "对方请求控制你的屏幕（可注入触摸与按键）"
+                        else "对方请求只读查看你的屏幕"
                         else -> request.optString("detail")
                     },
                 )

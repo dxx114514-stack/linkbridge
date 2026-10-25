@@ -1,0 +1,2 @@
+// 应用资源：wxWidgets 标准资源（含 comctl32 v6 清单，保证 Win7+ 原生控件与视觉样式）
+#include "wx/msw/wx.rc"

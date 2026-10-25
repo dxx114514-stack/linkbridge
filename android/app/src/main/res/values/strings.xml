@@ -3,4 +3,6 @@
     <string name="app_name">连桥 LinkBridge</string>
     <string name="channel_sync">连桥服务</string>
     <string name="channel_screen">屏幕共享</string>
+    <string name="accessibility_label">连桥屏幕控制</string>
+    <string name="accessibility_description">允许已配对设备在确认后向本机注入触摸与系统按键，用于远程协助；不读取屏幕内容，不采集文本。</string>
 </resources>

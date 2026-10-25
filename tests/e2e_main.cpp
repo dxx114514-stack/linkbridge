@@ -76,6 +76,24 @@ private:
     std::size_t captures_ = 0;
 };
 
+// 测试用输入注入后端：记录被控端收到的输入事件。
+class FakeScreenInput : public lb::IScreenInput {
+public:
+    lb::Result inject(const lb::ScreenInput& input) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        events_.push_back(input);
+        return lb::Result::ok();
+    }
+    std::vector<lb::ScreenInput> events() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return events_;
+    }
+
+private:
+    mutable std::mutex mu_;
+    std::vector<lb::ScreenInput> events_;
+};
+
 // 测试用剪贴板后端：模拟系统剪贴板的变化通知与写入计数。
 class FakeClipboardBackend : public lb::IClipboardBackend {
 public:
@@ -213,6 +231,7 @@ int main() {
     auto clip_b = std::make_shared<FakeClipboardBackend>();
     auto screen_a = std::make_shared<FakeScreenCapture>();
     auto screen_b = std::make_shared<FakeScreenCapture>();
+    auto input_b = std::make_shared<FakeScreenInput>();
 
     const auto sync_a = base / "sync_a";
     const auto sync_b = base / "sync_b";
@@ -233,6 +252,7 @@ int main() {
     options_b.device_name = "E2E-B";
     options_b.clipboard_backend = clip_b;
     options_b.screen_capture = screen_b;
+    options_b.screen_input = input_b;
     options_b.config.sync.folder = sync_b.string();
     options_b.config.clipboard.mode = "confirm"; // B 默认为确认模式
     options_b.config.clipboard.max_bytes = 64 * 1024; // 便于覆盖超限拒绝
@@ -521,6 +541,70 @@ int main() {
     const auto screen_confirm_ok = node_a->screen().view(id_b, screen_out.string(), 400);
     check(screen_confirm_ok.has_value() && screen_confirm_ok->frames > 0,
           "自动接受后屏幕查看成功");
+
+    // ---- 2d-2. 屏幕控制（被控端经无障碍服务注入输入）----
+    {
+        lb::ScreenInputQueue queue;
+        lb::ScreenInput tap;
+        tap.type = lb::ScreenInputType::Tap;
+        tap.x1 = 120;
+        tap.y1 = 240;
+        queue.push(tap);
+        lb::ScreenInput swipe;
+        swipe.type = lb::ScreenInputType::Swipe;
+        swipe.x1 = 10;
+        swipe.y1 = 20;
+        swipe.x2 = 300;
+        swipe.y2 = 400;
+        swipe.duration_ms = 150;
+        queue.push(swipe);
+        lb::ScreenInput key;
+        key.type = lb::ScreenInputType::Key;
+        key.key = lb::ScreenKey::Home;
+        queue.push(key);
+
+        const auto denied_control = node_a->screen().view(id_b, screen_out.string(), 300, &queue);
+        check(!denied_control.has_value(), "未授予控制权限时自动接受被拒绝");
+        if (denied_control) std::printf("  原因: %s\n", denied_control.error.c_str());
+        check(input_b->events().empty(), "被拒绝的会话未注入任何输入");
+        check(queue.size() == 3, "被拒绝的会话未消费输入队列");
+
+        if (const auto b_to_a = node_b->trust().get(id_a)) {
+            lb::TrustRecord granted = *b_to_a;
+            granted.permissions |= lb::kPermScreenControl;
+            check(node_b->trust().upsert(granted).success, "B 授予 A 屏幕控制权限");
+        }
+
+        const auto control = node_a->screen().view(id_b, screen_out.string(), 800, &queue);
+        check(control.has_value(), "控制模式会话建立成功");
+        if (!control) std::printf("  原因: %s\n", control.error.c_str());
+        if (control) {
+            check(control->inputs == 3, "控制会话发送三次输入");
+            check(control->frames > 0, "控制会话同时接收画面帧");
+        }
+        const auto injected = input_b->events();
+        check(injected.size() == 3, "被控端收到三次输入注入");
+        if (injected.size() == 3) {
+            check(injected[0].type == lb::ScreenInputType::Tap && injected[0].x1 == 120 &&
+                      injected[0].y1 == 240,
+                  "单击坐标原样送达");
+            check(injected[1].type == lb::ScreenInputType::Swipe && injected[1].x2 == 300 &&
+                      injected[1].duration_ms == 150,
+                  "滑动坐标与时长原样送达");
+            check(injected[2].type == lb::ScreenInputType::Key &&
+                      injected[2].key == lb::ScreenKey::Home,
+                  "系统按键原样送达");
+        }
+
+        // 权限撤销后控制模式再次被拒绝
+        if (const auto b_to_a = node_b->trust().get(id_a)) {
+            lb::TrustRecord revoked = *b_to_a;
+            revoked.permissions &= ~lb::kPermScreenControl;
+            node_b->trust().upsert(revoked);
+            const auto denied_again = node_a->screen().view(id_b, screen_out.string(), 300, &queue);
+            check(!denied_again.has_value(), "撤销控制权限后控制模式被拒绝");
+        }
+    }
 
     // ---- 2e. 文件夹同步（M6）----
     write_text(sync_a / "hello.txt", "hello from A");

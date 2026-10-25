@@ -3,7 +3,9 @@
 #include "core/pairing/pairing.h"
 #include "core/platform/platform.h"
 
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -61,8 +63,8 @@ bool prompt_clipboard(const lb::ClipboardContent& content, const std::string& fr
 bool prompt_screen(const std::string& from_name, const std::string& mode) {
     std::lock_guard<std::mutex> lk(g_console_mu);
     std::printf("\n[屏幕共享请求]\n  设备: %s\n  模式: %s\n", from_name.c_str(),
-                mode == "view" ? "只读查看" : mode.c_str());
-    std::printf("接受对方查看你的屏幕? (y/N): ");
+                mode == "view" ? "只读查看" : "远程控制（可注入触摸与按键）");
+    std::printf("接受对方%s你的屏幕? (y/N): ", mode == "view" ? "查看" : "控制");
     std::fflush(stdout);
     std::string line;
     if (!std::getline(std::cin, line)) return false;
@@ -78,8 +80,12 @@ std::string format_utc_time(std::int64_t ts) {
     if (ts <= 0) return "-";
     const std::time_t t = static_cast<std::time_t>(ts);
     std::tm tm{};
+#if defined(_WIN32)
     gmtime_s(&tm, &t);
-    char buf[32];
+#else
+    gmtime_r(&t, &tm);
+#endif
+    char buf[64];
     std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", tm.tm_year + 1900,
                   tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
     return buf;
@@ -743,7 +749,7 @@ int main(int argc, char** argv) {
                     node->config().heartbeat.interval_sec,
                     node->config().clipboard.enabled ? "启用" : "停用",
                     node->config().clipboard.mode.c_str(),
-                    node->config().screen.enabled ? "启用（只读查看）" : "停用",
+                    node->config().screen.enabled ? "启用（查看/控制）" : "停用",
                     node->config().sync.enabled ? "启用" : "停用");
         if (node->config().sync.enabled) {
             std::printf("同步文件夹: %s（模式 %s，每 %d 秒全量扫描）\n",

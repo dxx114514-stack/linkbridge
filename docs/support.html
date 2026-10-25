@@ -142,6 +142,11 @@
             <td>解锁桌面并保持交互会话；Android 端点“允许查看本机屏幕”并同意系统授权；确认配置开启</td>
           </tr>
           <tr>
+            <td>屏幕控制点击/滑动没有反应</td>
+            <td>被控 Android 端未启用无障碍服务；或被控端为 Windows / Linux（无注入实现）；未授予屏幕控制权限</td>
+            <td>在被控端“设置 → 无障碍”启用「连桥屏幕控制」并在应用内刷新状态；无人值守时在信任记录中授予控制权限</td>
+          </tr>
+          <tr>
             <td>同步没有任何变化</td>
             <td><code>[sync].enabled=false</code> 或 <code>folder</code> 为空；两端模式不一致；文件命中忽略规则</td>
             <td>执行 <code>sync status</code> 核对配置；两端设为相同模式；检查 <code>ignore</code></td>
@@ -185,7 +190,7 @@
           <tr><td>ssh_port</td><td><code>45712</code></td><td>远程文件通道预留，当前未启用</td><td>—</td></tr>
           <tr><td>transfer_port</td><td><code>45713</code></td><td>文件传输</td><td>发起方 → 对端</td></tr>
           <tr><td>clipboard_port</td><td><code>45714</code></td><td>剪贴板推送</td><td>发起方 → 对端</td></tr>
-          <tr><td>screen_port</td><td><code>45715</code></td><td>只读屏幕帧推送</td><td>被查看方 → 查看方</td></tr>
+          <tr><td>screen_port</td><td><code>45715</code></td><td>屏幕查看 / 控制会话</td><td>双向（被控方推帧，查看方发输入）</td></tr>
           <tr><td>sync_port</td><td><code>45716</code></td><td>文件夹同步会话</td><td>双向</td></tr>
         </tbody>
       </table>
@@ -220,8 +225,8 @@
       </article>
       <article class="card">
         <span class="idx">屏幕</span>
-        <h3>只读，且依赖交互式桌面</h3>
-        <p>无键鼠注入；锁屏、UAC 安全桌面、无会话的服务上下文可能得到黑屏。帧为原始 DIB，4K 桌面需调高 <code>[screen].max_bytes</code>。</p>
+        <h3>控制需被控端具备注入后端</h3>
+        <p>目前只有 Android 被控端支持注入（无障碍服务，含点击/滑动/返回/主页/最近任务）；Windows、Linux 作为被控端时控制请求会被拒绝，仅支持只读查看。锁屏、UAC 安全桌面、无会话的服务上下文可能得到黑屏。帧为原始 DIB，4K 桌面需调高 <code>[screen].max_bytes</code>。</p>
       </article>
       <article class="card">
         <span class="idx">同步</span>
@@ -349,9 +354,16 @@ adb shell dumpsys activity services com.linkbridge.app</code></pre>
     </details>
 
     <details class="faq">
-      <summary>屏幕共享能控制对方电脑吗？</summary>
+      <summary>屏幕共享能控制对方设备吗？</summary>
       <div class="answer">
-        <p>不能。v0 为只读实现，协议中没有键鼠注入指令，<code>mode=control</code> 会被拒绝。远程控制需另立通道并补齐输入注入与“锁定输入”语义。</p>
+        <p>部分可以。控制模式（<code>mode=control</code>）已在同一加密通道内实现，但目前只有 <strong>Android 被控端</strong>具备输入注入后端：需先在系统“设置 → 无障碍”中启用「连桥屏幕控制」，之后对端可注入点击、滑动、返回 / 主页 / 最近任务。Windows、Linux 作为被控端时没有输入注入实现，控制会话会被明确拒绝，只能只读查看。控制权限与只读权限分开授权，无人值守连接必须在信任记录中显式授予屏幕控制权限。</p>
+      </div>
+    </details>
+
+    <details class="faq">
+      <summary>Android 端怎么开启屏幕控制？</summary>
+      <div class="answer">
+        <p>打开系统“设置 → 无障碍”，在已下载的服务中找到「连桥屏幕控制」并启用；然后回到应用首页的“屏幕控制（无障碍）”区块点“刷新状态”。该服务只注入手势与系统按键，<code>canRetrieveWindowContent=false</code>，不读取屏幕内容。系统不允许应用自行开启，必须手动授权。</p>
       </div>
     </details>
 
