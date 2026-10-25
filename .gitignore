@@ -35,9 +35,6 @@ debug.log
 *.ilk
 *.exe
 
-# 独立仓库（Wiki）
-/wiki/
-
 # 编辑器
 .idea/
 .vs/
