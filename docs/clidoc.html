@@ -36,6 +36,7 @@
     <a class="sub" href="#clip">clip</a>
     <a class="sub" href="#screen">screen</a>
     <a class="sub" href="#sync">sync</a>
+    <a class="sub" href="#perms">perms / notify</a>
     <a class="sub" href="#daemon">daemon</a>
     <a href="#config">配置文件</a>
     <a href="#data">数据目录</a>
@@ -100,6 +101,10 @@
             <tr><td><code>sync resolve &lt;路径&gt; &lt;策略&gt;</code></td><td>解决指定冲突</td></tr>
             <tr><td><code>sync history [路径]</code></td><td>列出回收站中的历史版本</td></tr>
             <tr><td><code>sync restore &lt;路径&gt; [版本ID]</code></td><td>恢复历史版本</td></tr>
+            <tr><td><code>perms [设备]</code></td><td>列出设备权限总览；指定设备时逐项显示</td></tr>
+            <tr><td><code>perms &lt;设备&gt; &lt;权限&gt; &lt;on|off&gt;</code></td><td>单独开关某项权限，即时生效并写入审计日志</td></tr>
+            <tr><td><code>perms log</code></td><td>查看最近的权限变更审计日志</td></tr>
+            <tr><td><code>notify status</code></td><td>显示通知镜像配置、预设动作与通道端口</td></tr>
             <tr><td><code>daemon</code></td><td>启动全部监听、心跳与后台服务并持续运行</td></tr>
           </tbody>
         </table>
@@ -326,6 +331,49 @@ linkbridge clip push all "同一段文本"
       </div>
     </section>
 
+    <!-- ========== perms / notify ========== -->
+    <section class="section" id="perms">
+      <div class="kicker">命令</div>
+      <h2>perms / notify</h2>
+
+      <div class="cmd">
+        <div class="cmd-head"><h3>linkbridge perms [设备]</h3><span class="badge">权限</span></div>
+        <div class="syntax">linkbridge perms [设备名|设备ID]</div>
+        <p>不带参数时列出每台设备及 8 个权限位的开关状态；指定设备时逐项显示名称、说明与当前状态。</p>
+        <div class="label">输出示例</div>
+        <pre><code>V2284A (b89bc78fdb46ece3)  掩码 0x0000005f
+  file_transfer    on  文件互传
+  clipboard        on  剪贴板
+  remote_fs        off 远程文件
+  screen_control   off 屏幕控制
+  screen_share     on  屏幕共享
+  sync             on  文件夹同步
+  notify_mirror    on  通知镜像
+  notify_action    off 通知动作</code></pre>
+      </div>
+
+      <div class="cmd">
+        <div class="cmd-head"><h3>linkbridge perms &lt;设备&gt; &lt;权限&gt; &lt;on|off&gt;</h3><span class="badge accent">变更</span></div>
+        <div class="syntax">linkbridge perms V2284A notify_action on</div>
+        <p>单独开关某项权限。变更立即落盘并生效，随后追加一条审计记录（旧掩码 → 新掩码、变更项）。</p>
+        <div class="callout warn">
+          <p><strong>通知动作（<code>notify_action</code>）属于敏感权限。</strong> 开启后对端点击镜像通知即可在本机打开应用或按预设坐标点击，请仅对完全可信的设备开启。</p>
+        </div>
+      </div>
+
+      <div class="cmd">
+        <div class="cmd-head"><h3>linkbridge perms log</h3><span class="badge">审计</span></div>
+        <div class="syntax">linkbridge perms log</div>
+        <p>打印最近的权限变更记录（时间均为 UTC，最多 200 条；磁盘上保留最近 500 行于 <code>permissions.log</code>）。</p>
+      </div>
+
+      <div class="cmd">
+        <div class="cmd-head"><h3>linkbridge notify status</h3><span class="badge">诊断</span></div>
+        <div class="syntax">linkbridge notify status</div>
+        <p>显示通知镜像开关、去重窗口、文本上限、预设动作（<code>open_app</code> / <code>tap</code> / <code>none</code>）、动作坐标与延时、自动执行开关、忽略应用以及监听端口（默认 45717）。</p>
+      </div>
+    </section>
+
     <!-- ========== daemon ========== -->
     <section class="section" id="daemon">
       <div class="kicker">命令</div>
@@ -334,7 +382,7 @@ linkbridge clip push all "同一段文本"
       <div class="cmd">
         <div class="cmd-head"><h3>linkbridge daemon</h3><span class="badge accent">常驻</span></div>
         <div class="syntax">linkbridge daemon [--duration N]</div>
-        <p>启动配对、心跳、传输、剪贴板、屏幕共享与文件夹同步的监听，周期探测受信任设备。每 10 秒打印一次设备在线状态与心跳统计，按 <kbd>Ctrl+C</kbd> 退出。</p>
+        <p>启动配对、心跳、传输、剪贴板、屏幕共享、文件夹同步与通知镜像的监听，周期探测受信任设备。每 10 秒打印一次设备在线状态与心跳统计，按 <kbd>Ctrl+C</kbd> 退出。</p>
         <div class="label">输出示例</div>
         <pre><code>服务已启动；配对端口 45710，心跳端口 45711，传输端口 45713，剪贴板端口 45714，屏幕共享端口 45715，文件夹同步端口 45716。
 心跳间隔 30 秒；剪贴板同步 启用（模式 confirm）；屏幕共享 启用（只读查看）；文件夹同步 启用。

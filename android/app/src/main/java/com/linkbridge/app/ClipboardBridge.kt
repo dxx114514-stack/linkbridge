@@ -53,6 +53,8 @@ object ClipboardBridge {
         return try {
             val text = String(data, Charsets.UTF_8)
             clipboard(ctx).setPrimaryClip(ClipData.newPlainText("LinkBridge", text))
+            // 记录来自对端的内容，避免自动获取模式把它再推回对端造成回环
+            ClipboardAutoSync.recordRemote(ctx, text)
             sequence.incrementAndGet()
             true
         } catch (e: Exception) {

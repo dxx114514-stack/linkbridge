@@ -31,6 +31,7 @@ struct PeerInfo {
     int clipboard_port = 0; // 对端剪贴板通道端口
     int screen_port = 0;    // 对端屏幕共享通道端口
     int sync_port = 0;      // 对端文件夹同步通道端口
+    int notify_port = 0;    // 对端通知镜像通道端口
 
     ByteBuf to_bytes() const;
     static Expected<PeerInfo> from_bytes(const ByteBuf& data);
@@ -83,8 +84,8 @@ public:
     void set_confirm_handler(ConfirmFn handler); // 本端作为响应方时确认入站配对
     void set_auto_accept(bool value);
     void set_advertised_ports(int heartbeat_port, int ssh_port, int transfer_port,
-                              int clipboard_port, int screen_port,
-                              int sync_port); // 监听实际启动后调用
+                              int clipboard_port, int screen_port, int sync_port,
+                              int notify_port); // 监听实际启动后调用
 
     // 发起方：阻塞完成一次配对
     Result pair_with(const std::string& ip, int port, const std::string& code);
@@ -130,6 +131,7 @@ private:
     int advertised_clipboard_port_ = 0;
     int advertised_screen_port_ = 0;
     int advertised_sync_port_ = 0;
+    int advertised_notify_port_ = 0;
 };
 
 } // namespace lb

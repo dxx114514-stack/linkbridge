@@ -342,7 +342,7 @@ adb shell dumpsys activity services com.linkbridge.app</code></pre>
     <details class="faq">
       <summary>升级版本后需要重新配对吗？</summary>
       <div class="answer">
-        <p>同版本内升级不需要。若信任库或设备信息格式发生升级（例如 LBT5、<code>PeerInfo</code> 版本 2），旧格式不兼容，必须重新配对。升级前建议备份数据目录。</p>
+        <p>同版本内升级不需要。信任库与设备信息均兼容读取旧格式：LBT5 信任库与 <code>PeerInfo</code> v2 会被自动升级为 LBT6 / v3，无需重新配对。仅当未来再次破坏性变更格式时才需要重新配对；升级前建议备份数据目录。</p>
       </div>
     </details>
 
@@ -371,6 +371,35 @@ adb shell dumpsys activity services com.linkbridge.app</code></pre>
       <summary>最新的画面文件为什么打不开或特别大？</summary>
       <div class="answer">
         <p><code>latest.bmp</code> 是原始 32 位 DIB（含 40 字节 <code>BITMAPINFOHEADER</code>），单帧体积约为宽 × 高 × 4 字节，1920×1080 约 8 MB。可用画图、Photoshop 打开，或用 <code>ffmpeg -i latest.bmp latest.png</code> 转换。</p>
+      </div>
+    </details>
+    <details class="faq">
+      <summary>通知镜像怎么配置？点击镜像通知没反应怎么办？</summary>
+      <div class="answer">
+        <p>三步：1) Android 端在“通知镜像”区块点“通知使用权设置”，在系统页授予「连桥通知镜像」；2) 在设备卡片的权限列表中为对端开启 <code>notify_mirror</code>；3) 若要点击后自动执行动作，还需开启 <code>notify_action</code> 并确保来源设备有可用的 Shizuku 或无障碍注入后端。</p>
+        <p>点击镜像通知会在后台向来源设备发起动作请求，网络慢时需要等待几秒；失败会通过 Toast 显示明确原因（未授权、后端不可用、来源离线等）。重复点击不会重复执行（动作按 <code>peer|id</code> 做 3 秒幂等）。</p>
+      </div>
+    </details>
+
+    <details class="faq">
+      <summary>悬浮球开启后看不到，或挡住了按钮怎么办？</summary>
+      <div class="answer">
+        <p>先在“悬浮球”区块确认“悬浮层权限”为“已授予”，否则系统不允许绘制覆盖层；未授权时点“授予悬浮层权限”跳转设置。若显示规则设为“仅同步服务运行时”，需要先启动同步服务。</p>
+        <p>悬浮球松手后会自动吸附到左右边缘，并始终避开状态栏与底部 96dp 的手势区。仍觉得遮挡时，可减小尺寸、降低不透明度、更换位置，或在“在以下应用隐藏（包名）”中填入门阅、游戏等前台包名（需要启用无障碍服务来识别前台应用）。</p>
+      </div>
+    </details>
+
+    <details class="faq">
+      <summary>Shizuku 显示“未就绪”会影响通知动作吗？</summary>
+      <div class="answer">
+        <p>不会导致功能不可用，只会影响动作执行方式。优先级为：Shizuku <code>input tap</code> → 无障碍注入 → 打开来源应用。当前安装包通过反射调用 Shizuku，未集成其 API 时会显示“未集成 Shizuku API”，此时请开启无障碍服务作为降级方案。若已安装 Shizuku，请在其应用内启动服务并授权连桥，然后回到首页“刷新”状态。</p>
+      </div>
+    </details>
+
+    <details class="faq">
+      <summary>如何只关闭某台设备的某一项权限？</summary>
+      <div class="answer">
+        <p>Android：在“受信任设备”卡片中逐项切换开关，变更立即生效。命令行：<code>linkbridge perms</code> 查看总览，<code>linkbridge perms &lt;设备&gt; &lt;权限&gt; &lt;on|off&gt;</code> 修改，<code>linkbridge perms log</code> 查看审计记录。每次变更都会先落盘再返回，失败会回滚，因此不会出现“界面显示已关闭但实际仍生效”的情况。</p>
       </div>
     </details>
   </div>

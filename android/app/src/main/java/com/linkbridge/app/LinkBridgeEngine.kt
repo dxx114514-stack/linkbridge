@@ -36,6 +36,9 @@ object LinkBridgeEngine {
     private val _conflicts = MutableStateFlow<List<JSONObject>>(emptyList())
     val conflicts: StateFlow<List<JSONObject>> = _conflicts
 
+    private val _permissionCatalog = MutableStateFlow<List<JSONObject>>(emptyList())
+    val permissionCatalog: StateFlow<List<JSONObject>> = _permissionCatalog
+
     private val _message = MutableStateFlow("")
     val message: StateFlow<String> = _message
 
@@ -52,6 +55,7 @@ object LinkBridgeEngine {
         initialized = true
         NativeBridge.nativeSetPaths(ctx.filesDir.absolutePath, ctx.cacheDir.absolutePath)
         ClipboardBridge.init(ctx)
+        NotifyBridge.init(ctx)
         scope.launch { refresh() }
     }
 
@@ -81,6 +85,10 @@ object LinkBridgeEngine {
         }
         try {
             _conflicts.value = toList(NativeBridge.nativeConflictsJson())
+        } catch (_: Exception) {
+        }
+        try {
+            _permissionCatalog.value = toList(NativeBridge.nativePermissionCatalogJson())
         } catch (_: Exception) {
         }
     }
@@ -119,6 +127,22 @@ object LinkBridgeEngine {
 
     suspend fun pushClipboard(text: String): String = withContext(Dispatchers.IO) {
         NativeBridge.nativePushClipboard(text)
+    }
+
+    /** 逐设备、逐权限位更新；即时生效并写入审计日志。 */
+    suspend fun setPermissions(deviceId: String, mask: Long): String = withContext(Dispatchers.IO) {
+        NativeBridge.nativeSetPermissions(deviceId, mask).also { refresh() }
+    }
+
+    /** 移除受信任设备（解除配对），立即生效。 */
+    suspend fun removeDevice(deviceId: String): String = withContext(Dispatchers.IO) {
+        NativeBridge.nativeRemoveDevice(deviceId).also { refresh() }
+    }
+
+    /** 运行时开关通知镜像（不写入配置文件）。 */
+    fun setNotifyEnabled(value: Boolean) {
+        NativeBridge.nativeSetNotifyEnabled(value)
+        scope.launch { refresh() }
     }
 
     fun respondConfirm(id: Int, accept: Boolean) {

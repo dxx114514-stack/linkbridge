@@ -14,6 +14,7 @@ struct NetworkConfig {
     int clipboard_port = 45714; // M4 剪贴板同步通道
     int screen_port = 45715;    // M5 屏幕共享通道
     int sync_port = 45716;      // M6 文件夹同步通道
+    int notify_port = 45717;    // M8 通知镜像通道
     std::string bind_addr = "0.0.0.0";
     int connect_timeout_ms = 5000;
 };
@@ -45,6 +46,18 @@ struct ScreenConfig {             // M5 屏幕共享（v0 仅只读查看）
     int max_bytes = 16777216;     // 单帧上限
 };
 
+struct NotifyConfig {             // M8 跨设备通知镜像
+    bool enabled = true;
+    int dedupe_window_sec = 20;    // 同一通知在该窗口内只镜像/执行一次
+    int max_text_bytes = 4096;     // 标题与正文总长度上限
+    std::string action_mode = "open_app"; // open_app | tap | none
+    int action_x = 0;              // action_mode=tap 时的目标坐标
+    int action_y = 0;
+    int action_delay_ms = 400;     // 触发动作前的等待（等待前台切换）
+    bool auto_action = false;      // 收到动作请求时无需人工确认直接执行
+    std::string ignore_apps;       // 逗号分隔的包名，完全忽略（镜像与动作）
+};
+
 struct SyncConfig {               // M6/M7 文件夹同步（单文件夹）
     bool enabled = false;
     std::string folder;           // 本端同步根目录；为空表示未配置
@@ -68,6 +81,7 @@ struct AppConfig {
     TransferConfig transfer;
     ClipboardConfig clipboard;
     ScreenConfig screen;
+    NotifyConfig notify;
     SyncConfig sync;
 };
 

@@ -19,7 +19,7 @@ constexpr std::uint8_t kPairAuth = 0x13;
 constexpr std::uint8_t kPairResp = 0x14;
 constexpr std::uint8_t kPairFinal = 0x15;
 constexpr std::uint8_t kPairFail = 0x16;
-constexpr std::uint8_t kPeerInfoVersion = 2;
+constexpr std::uint8_t kPeerInfoVersion = 3;
 
 std::int64_t now_seconds() {
     return std::chrono::duration_cast<std::chrono::seconds>(
@@ -101,12 +101,15 @@ ByteBuf PeerInfo::to_bytes() const {
     w.u32(static_cast<std::uint32_t>(clipboard_port));
     w.u32(static_cast<std::uint32_t>(screen_port));
     w.u32(static_cast<std::uint32_t>(sync_port));
+    w.u32(static_cast<std::uint32_t>(notify_port));
     return w.buf();
 }
 
 Expected<PeerInfo> PeerInfo::from_bytes(const ByteBuf& data) {
     ByteReader r(data);
-    if (r.u8() != kPeerInfoVersion) return Expected<PeerInfo>::fail("设备信息版本不兼容");
+    const std::uint8_t version = r.u8();
+    // 2 = 旧版（无 notify_port）；3 = 当前版本
+    if (version != 2 && version != 3) return Expected<PeerInfo>::fail("设备信息版本不兼容");
     PeerInfo info;
     info.device_id = r.str();
     info.name = r.str();
@@ -121,6 +124,8 @@ Expected<PeerInfo> PeerInfo::from_bytes(const ByteBuf& data) {
     info.clipboard_port = static_cast<int>(r.u32());
     info.screen_port = static_cast<int>(r.u32());
     info.sync_port = static_cast<int>(r.u32());
+    if (version >= 3) info.notify_port = static_cast<int>(r.u32());
+    else info.notify_port = 45717;
     if (!r.ok() || info.device_id.empty() || info.public_key.size() != 65)
         return Expected<PeerInfo>::fail("设备信息字段非法");
     return Expected<PeerInfo>::success(std::move(info));
@@ -210,7 +215,8 @@ void PairingService::set_auto_accept(bool value) {
 }
 
 void PairingService::set_advertised_ports(int heartbeat_port, int ssh_port, int transfer_port,
-                                          int clipboard_port, int screen_port, int sync_port) {
+                                          int clipboard_port, int screen_port, int sync_port,
+                                          int notify_port) {
     std::lock_guard<std::mutex> lk(mu_);
     advertised_heartbeat_port_ = heartbeat_port;
     advertised_ssh_port_ = ssh_port;
@@ -218,6 +224,7 @@ void PairingService::set_advertised_ports(int heartbeat_port, int ssh_port, int 
     advertised_clipboard_port_ = clipboard_port;
     advertised_screen_port_ = screen_port;
     advertised_sync_port_ = sync_port;
+    advertised_notify_port_ = notify_port;
 }
 
 bool PairingService::consume_attempt_locked() {
@@ -272,6 +279,7 @@ PeerInfo PairingService::build_self_info(const std::string& peer_ip) const {
         info.clipboard_port = advertised_clipboard_port_ > 0 ? advertised_clipboard_port_ : 45714;
         info.screen_port = advertised_screen_port_ > 0 ? advertised_screen_port_ : 45715;
         info.sync_port = advertised_sync_port_ > 0 ? advertised_sync_port_ : 45716;
+        info.notify_port = advertised_notify_port_ > 0 ? advertised_notify_port_ : 45717;
     }
     return info;
 }
@@ -318,6 +326,7 @@ Result PairingService::persist_peer(const PeerInfo& peer) {
     record.clipboard_port = peer.clipboard_port > 0 ? peer.clipboard_port : 45714;
     record.screen_port = peer.screen_port > 0 ? peer.screen_port : 45715;
     record.sync_port = peer.sync_port > 0 ? peer.sync_port : 45716;
+    record.notify_port = peer.notify_port > 0 ? peer.notify_port : 45717;
     record.paired_at = now_seconds();
     record.permissions = kPermDefault;
     return trust_.upsert(record);

@@ -348,6 +348,55 @@ void attach_event_forwarding(lb::Node& node) {
             .str("reason", e.reason);
         emit(j.done());
     }));
+    subs.push_back(ev.subscribe<NotifyMirrored>([](const NotifyMirrored& e) {
+        Json j;
+        j.str("type", "notify_mirrored")
+            .str("from", e.from)
+            .str("from_name", e.from_name)
+            .str("app", e.app)
+            .str("app_name", e.app_name)
+            .str("title", e.title)
+            .boolean("applied", e.applied)
+            .str("reason", e.reason);
+        emit(j.done());
+    }));
+    subs.push_back(ev.subscribe<NotifyMirrorSent>([](const NotifyMirrorSent& e) {
+        Json j;
+        j.str("type", "notify_mirror_sent")
+            .str("to", e.to)
+            .str("to_name", e.to_name)
+            .str("app", e.app)
+            .str("title", e.title);
+        emit(j.done());
+    }));
+    subs.push_back(ev.subscribe<NotifyFailed>([](const NotifyFailed& e) {
+        Json j;
+        j.str("type", "notify_failed")
+            .str("peer", e.peer)
+            .str("peer_name", e.peer_name)
+            .str("reason", e.reason);
+        emit(j.done());
+    }));
+    subs.push_back(ev.subscribe<NotifyActionReceived>([](const NotifyActionReceived& e) {
+        Json j;
+        j.str("type", "notify_action_received")
+            .str("from", e.from)
+            .str("from_name", e.from_name)
+            .str("notification_id", e.notification_id)
+            .str("mode", e.mode)
+            .boolean("executed", e.executed)
+            .str("reason", e.reason);
+        emit(j.done());
+    }));
+    subs.push_back(ev.subscribe<NotifyActionDone>([](const NotifyActionDone& e) {
+        Json j;
+        j.str("type", "notify_action_done")
+            .str("peer", e.peer)
+            .str("notification_id", e.notification_id)
+            .boolean("ok", e.ok)
+            .str("reason", e.reason);
+        emit(j.done());
+    }));
 
     std::lock_guard<std::mutex> lk(g_mu);
     g_subs = std::move(subs);
@@ -397,6 +446,11 @@ std::string start_engine(const std::string& device_name) {
     node->screen().set_confirm_handler([](const std::string& from, const std::string& mode) {
         return request_confirm("screen", from, mode, "");
     });
+    node->notify().set_action_confirm_handler(
+        [](const std::string& from, const lb::NotifyMessage& msg) {
+            return request_confirm("notify_action", from,
+                                   msg.app_name + "：" + msg.title + "\n" + msg.text, "");
+        });
 
     if (auto r = node->start(); !r) {
         __android_log_print(ANDROID_LOG_ERROR, "lb_jni", "node->start failed: %s",
@@ -522,6 +576,11 @@ JNIEXPORT jstring JNICALL Java_com_linkbridge_app_NativeBridge_nativeDevicesJson
             .str("ip", d.last_ip)
             .num("last_seen", static_cast<long long>(d.last_seen))
             .num("paired_at", static_cast<long long>(d.paired_at));
+        if (const auto rec = node->trust().get(d.device_id))
+            j.num("permissions", static_cast<long long>(rec->permissions))
+                .str("permissions_text", lb::permission_mask_text(rec->permissions));
+        else
+            j.num("permissions", 0).str("permissions_text", "-");
         out += j.done();
     }
     out += "]";
@@ -600,6 +659,7 @@ JNIEXPORT jstring JNICALL Java_com_linkbridge_app_NativeBridge_nativeStatusJson(
         .num("clipboard_port", node->clipboard_port())
         .num("screen_port", node->screen_port())
         .num("sync_port", node->sync_port())
+        .num("notify_port", node->notify_port())
         .num("heartbeat_ok", static_cast<long long>(node->heartbeat().probes_ok()))
         .num("heartbeat_failed", static_cast<long long>(node->heartbeat().probes_failed()))
         .num("heartbeat_interval", node->heartbeat().current_interval_sec())
@@ -612,7 +672,14 @@ JNIEXPORT jstring JNICALL Java_com_linkbridge_app_NativeBridge_nativeStatusJson(
                               std::string(cfg.clipboard.enabled ? "true" : "false") +
                               ",\"mode\":\"" + escape_json(cfg.clipboard.mode) + "\"}")
         .raw("screen", "{\"enabled\":" + std::string(cfg.screen.enabled ? "true" : "false") +
-                           ",\"max_fps\":" + std::to_string(cfg.screen.max_fps) + "}");
+                           ",\"max_fps\":" + std::to_string(cfg.screen.max_fps) + "}")
+        .raw("notify", "{\"enabled\":" + std::string(cfg.notify.enabled ? "true" : "false") +
+                           ",\"runtime_enabled\":" +
+                           std::string(node->notify().enabled() ? "true" : "false") +
+                           ",\"dedupe_window_sec\":" + std::to_string(cfg.notify.dedupe_window_sec) +
+                           ",\"action_mode\":\"" + escape_json(cfg.notify.action_mode) +
+                           "\",\"auto_action\":" +
+                           std::string(cfg.notify.auto_action ? "true" : "false") + "}");
     return lb::android::to_jstring(e, j.done());
 }
 
@@ -685,6 +752,79 @@ Java_com_linkbridge_app_NativeBridge_nativePushClipboard(JNIEnv* e, jclass, jstr
     const lb::Result r =
         node->clipboard().push_to_all(content, node->config().network.connect_timeout_ms);
     return lb::android::to_jstring(e, r ? "" : r.error);
+}
+
+JNIEXPORT jstring JNICALL Java_com_linkbridge_app_NativeBridge_nativeNotifyPublish(
+    JNIEnv* e, jclass, jstring id, jstring app, jstring app_name, jstring title, jstring text,
+    jlong posted_at) {
+    const auto node = snapshot();
+    if (!node || !node->running()) return lb::android::to_jstring(e, "服务未启动");
+    if (!node->notify().enabled()) return lb::android::to_jstring(e, "通知镜像已停用");
+    lb::NotifyMessage msg;
+    msg.id = lb::android::to_string(e, id);
+    msg.app = lb::android::to_string(e, app);
+    msg.app_name = lb::android::to_string(e, app_name);
+    msg.title = lb::android::to_string(e, title);
+    msg.text = lb::android::to_string(e, text);
+    msg.posted_at = static_cast<std::int64_t>(posted_at);
+    const lb::Result r = node->notify().publish(msg, node->config().network.connect_timeout_ms);
+    return lb::android::to_jstring(e, r ? "" : r.error);
+}
+
+JNIEXPORT jstring JNICALL Java_com_linkbridge_app_NativeBridge_nativeNotifyAction(
+    JNIEnv* e, jclass, jstring source, jstring id, jstring app, jstring app_name, jstring title) {
+    const auto node = snapshot();
+    if (!node || !node->running()) return lb::android::to_jstring(e, "服务未启动");
+    const auto record = resolve_peer(node, lb::android::to_string(e, source));
+    if (!record) return lb::android::to_jstring(e, "未找到来源设备");
+    const lb::Result r = node->notify().request_action(
+        record->device_id, lb::android::to_string(e, id), lb::android::to_string(e, app),
+        lb::android::to_string(e, app_name), lb::android::to_string(e, title),
+        node->config().network.connect_timeout_ms);
+    return lb::android::to_jstring(e, r ? "" : r.error);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_linkbridge_app_NativeBridge_nativePermissionCatalogJson(JNIEnv* e, jclass) {
+    std::string out = "[";
+    bool first = true;
+    for (const auto& p : lb::permission_catalog()) {
+        if (!first) out += ",";
+        first = false;
+        Json j;
+        j.str("key", p.key)
+            .str("name", p.name)
+            .str("description", p.description)
+            .num("flag", static_cast<long long>(p.flag))
+            .boolean("default_granted", p.default_granted);
+        out += j.done();
+    }
+    out += "]";
+    return lb::android::to_jstring(e, out);
+}
+
+JNIEXPORT jstring JNICALL Java_com_linkbridge_app_NativeBridge_nativeSetPermissions(
+    JNIEnv* e, jclass, jstring device_id, jlong mask) {
+    const auto node = snapshot();
+    if (!node) return lb::android::to_jstring(e, "服务未启动");
+    const std::string id = lb::android::to_string(e, device_id);
+    const lb::Result r =
+        node->trust().set_permissions(id, static_cast<std::uint32_t>(mask & 0xffffffffLL));
+    return lb::android::to_jstring(e, r ? "" : r.error);
+}
+
+JNIEXPORT jstring JNICALL Java_com_linkbridge_app_NativeBridge_nativeRemoveDevice(
+    JNIEnv* e, jclass, jstring device_id) {
+    const auto node = snapshot();
+    if (!node || !node->running()) return lb::android::to_jstring(e, "服务未启动");
+    const lb::Result r = node->trust().remove(lb::android::to_string(e, device_id));
+    return lb::android::to_jstring(e, r ? "" : r.error);
+}
+
+JNIEXPORT void JNICALL
+Java_com_linkbridge_app_NativeBridge_nativeSetNotifyEnabled(JNIEnv*, jclass, jboolean value) {
+    const auto node = snapshot();
+    if (node) node->notify().set_enabled(value == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL Java_com_linkbridge_app_NativeBridge_nativeRespondConfirm(

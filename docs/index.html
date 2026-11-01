@@ -55,7 +55,7 @@
   <div class="wrap">
     <div class="section-head">
       <div class="kicker">能力</div>
-      <h2>六项能力，一套协议栈</h2>
+      <h2>十项能力，一套协议栈</h2>
       <p>所有功能共享同一个身份体系与安全通道，配对一次即可长期使用。同时提供控制台程序与桌面 GUI（wxWidgets 3.2，Windows 与 Linux 原生控件），控制台版便于脚本化与常驻运行。</p>
     </div>
 
@@ -117,6 +117,46 @@
         <ul>
           <li>Windows：CNG / DPAPI / Winsock2</li>
           <li>Android：JCA / Keystore / JNI / MediaProjection</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <span class="idx">07</span>
+        <h3>跨设备通知流转</h3>
+        <p>B 设备的通知实时镜像到 A；点击镜像通知即回唤 B 的原始通知，并可按预设动作自动打开应用或点击。</p>
+        <ul>
+          <li>入站/出站/动作三层去重，避免重复触发</li>
+          <li>来源设备决定动作模式，需「通知动作」权限</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <span class="idx">08</span>
+        <h3>可自定义悬浮球</h3>
+        <p>悬浮在所有应用之上，位置、大小、颜色、透明度、点击/长按动作与显示规则均可调。</p>
+        <ul>
+          <li>拖动吸边并记忆，自动避开底部手势区</li>
+          <li>支持「仅服务运行时显示」与按应用隐藏</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <span class="idx">09</span>
+        <h3>细粒度设备权限</h3>
+        <p>每台已配对设备、每一项权限都能单独开关；变更即时生效并写入审计日志。</p>
+        <ul>
+          <li>8 个权限位：文件/剪贴板/远程文件/屏幕/同步/通知</li>
+          <li>CLI 与 Android 共用同一份权限目录</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <span class="idx">10</span>
+        <h3>Shizuku 系统级适配</h3>
+        <p>需要系统权限的动作优先经 Shizuku 执行，状态检测、授权引导与异常处理齐全。</p>
+        <ul>
+          <li>不可用时自动降级为无障碍注入并明确提示</li>
+          <li>反射调用，不引入额外依赖、不会因缺失而崩溃</li>
         </ul>
       </article>
     </div>

@@ -6,6 +6,7 @@
 #include "core/config/config.h"
 #include "core/heartbeat/heartbeat.h"
 #include "core/identity/identity.h"
+#include "core/notify/notify.h"
 #include "core/pairing/pairing.h"
 #include "core/screen/screen.h"
 #include "core/sync/sync.h"
@@ -31,6 +32,7 @@ struct NodeOptions {
     std::shared_ptr<IClipboardBackend> clipboard_backend;
     std::shared_ptr<IScreenCapture> screen_capture;
     std::shared_ptr<IScreenInput> screen_input;
+    std::shared_ptr<INotifyBackend> notify_backend;
 };
 
 class Node {
@@ -47,6 +49,7 @@ public:
     ClipboardService& clipboard() { return *clipboard_; }
     ScreenService& screen() { return *screen_; }
     SyncService& sync() { return *sync_; }
+    NotifyService& notify() { return *notify_; }
     const AppConfig& config() const { return config_; }
 
     int pair_port() const { return pair_listen_ ? pair_listen_->port() : config_.network.pair_port; }
@@ -65,6 +68,9 @@ public:
     int sync_port() const {
         return sync_listen_ ? sync_listen_->port() : config_.network.sync_port;
     }
+    int notify_port() const {
+        return notify_listen_ ? notify_listen_->port() : config_.network.notify_port;
+    }
 
     // 启动监听与心跳调度
     Result start();
@@ -76,7 +82,7 @@ public:
 
 private:
     Node() = default;
-    enum class Channel { Pairing, Heartbeat, Transfer, Clipboard, Screen, Sync };
+    enum class Channel { Pairing, Heartbeat, Transfer, Clipboard, Screen, Sync, Notify };
     void accept_loop(Channel channel);
 
     std::string data_dir_;
@@ -91,6 +97,7 @@ private:
     std::unique_ptr<ClipboardService> clipboard_;
     std::unique_ptr<ScreenService> screen_;
     std::unique_ptr<SyncService> sync_;
+    std::unique_ptr<NotifyService> notify_;
     EventBus events_;
 
     std::unique_ptr<net::Listener> pair_listen_;
@@ -99,6 +106,7 @@ private:
     std::unique_ptr<net::Listener> clipboard_listen_;
     std::unique_ptr<net::Listener> screen_listen_;
     std::unique_ptr<net::Listener> sync_listen_;
+    std::unique_ptr<net::Listener> notify_listen_;
 
     std::atomic<bool> running_{false};
     std::thread pair_thread_;
@@ -107,6 +115,7 @@ private:
     std::thread clipboard_thread_;
     std::thread screen_thread_;
     std::thread sync_thread_;
+    std::thread notify_thread_;
 
     std::mutex handlers_mu_;
     std::condition_variable handlers_cv_;

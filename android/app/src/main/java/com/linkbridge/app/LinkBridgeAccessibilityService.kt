@@ -14,7 +14,10 @@ class LinkBridgeAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // 输入注入不需要事件流，保持空实现以降低开销。
+        // 只记录前台包名（供悬浮球「显示/隐藏规则」使用），不读取任何内容。
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            event.packageName?.toString()?.let { ForegroundAppTracker.current = it }
+        }
     }
 
     override fun onInterrupt() {

@@ -10,7 +10,7 @@ namespace lb {
 
 class ByteReader;
 
-// 权限位（v0 仅记录，M3+ 由 ACL 模块消费）
+// 权限位（逐设备独立授权；每次变更都写入审计日志）
 enum PermissionFlags : std::uint32_t {
     kPermFileTransfer = 1u << 0,
     kPermClipboard = 1u << 1,
@@ -18,8 +18,26 @@ enum PermissionFlags : std::uint32_t {
     kPermScreenControl = 1u << 3,
     kPermScreenShare = 1u << 4,
     kPermSync = 1u << 5,
-    kPermDefault = kPermFileTransfer | kPermClipboard | kPermScreenShare | kPermSync,
+    kPermNotifyMirror = 1u << 6, // 允许对端把通知镜像到本机
+    kPermNotifyAction = 1u << 7, // 允许对端在本机执行通知预设动作（敏感）
+    kPermDefault = kPermFileTransfer | kPermClipboard | kPermScreenShare | kPermSync |
+                   kPermNotifyMirror,
 };
+
+// 权限目录：UI/CLI 按同一份定义渲染开关与说明
+struct PermissionInfo {
+    std::uint32_t flag = 0;
+    const char* key = "";
+    const char* name = "";
+    const char* description = "";
+    bool default_granted = false;
+};
+
+const std::vector<PermissionInfo>& permission_catalog();
+// 按位查名称；未命中返回 "unknown"
+const char* permission_name(std::uint32_t flag);
+// "0x0000007f" 形式的掩码文本
+std::string permission_mask_text(std::uint32_t mask);
 
 struct TrustRecord {
     DeviceId device_id;
@@ -35,11 +53,13 @@ struct TrustRecord {
     int clipboard_port = 45714; // 对端通告的剪贴板通道端口
     int screen_port = 45715;    // 对端通告的屏幕共享通道端口
     int sync_port = 45716;      // 对端通告的文件夹同步通道端口
+    int notify_port = 45717;    // 对端通告的通知镜像通道端口
     std::int64_t paired_at = 0;
     std::uint32_t permissions = kPermDefault;
 
     ByteBuf to_bytes() const;
-    static Expected<TrustRecord> from_bytes(ByteReader& reader);
+    // legacy=true 时按旧版（无 notify_port）字段顺序解析
+    static Expected<TrustRecord> from_bytes(ByteReader& reader, bool legacy = false);
 };
 
 class TrustStore {
@@ -58,8 +78,15 @@ public:
     Result remove(const DeviceId& id);
     Result update_last_ip(const DeviceId& id, const std::string& ip);
 
+    // 逐设备、逐权限位更新；变更即时落盘并追加审计日志
+    Result set_permissions(const DeviceId& id, std::uint32_t permissions);
+    // 审计日志（每行：ISO 时间 | 设备 ID | 设备名 | 旧掩码 -> 新掩码 | 变更位）
+    std::vector<std::string> permission_audit_log(std::size_t max_lines = 200) const;
+
 private:
+    std::string dir_;
     std::string path_;
+    std::string audit_path_;
     std::vector<TrustRecord> records_;
 };
 

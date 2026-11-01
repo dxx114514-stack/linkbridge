@@ -60,6 +60,10 @@ LinkBridge 采用「单后台服务 + 前端 UI」的进程模型，每台设备
 | 配对通道 | 45710/TCP | TLS 1.3 + SPAKE2+（配对码作口令） | 临时配对交换，配对成功即关闭监听或仅响应已配对设备 |
 | 心跳通道 | 45711/TCP | TLS 1.3 双向证书认证 | 在线状态检测，轻量 ping/pong |
 | 业务通道 | 45712/TCP | SSH2（仅公钥认证） | SFTP 文件传输/远程文件管理、自定义子系统（剪贴板、同步）、VNC 端口转发 |
+| 剪贴板通道 | 45714/TCP | STS 双向认证 + AES-256-GCM | 文本/图片剪贴板推送 |
+| 屏幕共享通道 | 45715/TCP | STS 双向认证 + AES-256-GCM | 只读画面帧推送与输入注入 |
+| 文件夹同步通道 | 45716/TCP | STS 双向认证 + AES-256-GCM | 增量清单、差量传输、冲突与版本 |
+| 通知镜像通道 | 45717/TCP | STS 双向认证 + AES-256-GCM | 跨设备通知镜像与预设动作 |
 
 进程模型：桌面端一个常驻守护进程 `linkbridged` + UI 前端；Android 端一个 ForegroundService（含核心库 JNI）+ Compose UI。
 
@@ -79,6 +83,7 @@ LinkBridge 采用「单后台服务 + 前端 UI」的进程模型，每台设备
 | `core/remotefs` | 远程文件管理会话：目录列举/读写/删除/重命名/建目录，路径越权校验 | 全部操作经权限模块裁决 |
 | `core/screen` | 屏幕操作/共享会话管理：随机 VNC 密码、SSH 隧道建立、只读/可控制模式、一键断开 | 密码仅存内存，随会话销毁 |
 | `core/sync` | 文件夹同步引擎（详见第 9 节）：监听、扫描、增量、冲突、版本、回收站 | 独立状态机，每同步文件夹一个实例 |
+| `core/notify` | 跨设备通知镜像与预设动作：入站/出站去重、动作幂等、人工确认 | 平台能力经 `INotifyBackend` 注入，不可用即降级 |
 | `core/acl` | 权限模型与裁决：能力令牌、目录白名单、功能开关、会话授权 | 所有敏感操作唯一入口 |
 | `net/tls` | TLS 1.3 通道封装（配对 PSK/PAKE 模式、设备证书模式） | 实现 `ITransport` |
 | `net/ssh` | SSH 客户端/服务端封装（libssh），SFTP、自定义子系统、端口转发 | 实现 `ITransport`/`ISshChannel` |
@@ -188,24 +193,30 @@ Progress       { task_id, bytes_done, speed }    // 周期性进度事件
 ```
 TrustRecord {
   device_id, name, platform, fingerprints, paired_at,
-  permissions: {
-    file_transfer:   bool,              // 文件互传
-    clipboard:       { enabled, mode: auto|confirm, max_bytes },
-    remote_fs:       [ { local_path, access: ro|rw } ],   // 目录白名单
-    screen_control:  bool,              // 允许被控
-    screen_share:    bool,              // 允许被看
-    sync_folders:    [ SyncFolderGrant ]// 见第 9 节
-  }
+  permissions_mask: uint32              // v0.3 起逐设备、逐权限位独立开关
 }
 ```
+
+v0.3 权限位（`trust_store.h::PermissionFlags`，UI 与 CLI 共用同一份目录）：
+
+| 位 | key | 名称 | 说明 |
+|---|---|---|---|
+| 0 | `file_transfer` | 文件互传 | 允许向本机发送文件 |
+| 1 | `clipboard` | 剪贴板 | 允许写入本机剪贴板 |
+| 2 | `remote_fs` | 远程文件 | 远程目录读写 |
+| 3 | `screen_control` | 屏幕控制 | 允许注入触摸/按键 |
+| 4 | `screen_share` | 屏幕共享 | 允许查看本机屏幕 |
+| 5 | `sync` | 文件夹同步 | 允许参与目录同步 |
+| 6 | `notify_mirror` | 通知镜像 | 允许对端把通知镜像到本机（默认开启） |
+| 7 | `notify_action` | 通知动作 | 允许对端在本机执行预设动作（敏感，默认关闭） |
 
 裁决规则：
 
 1. 每个传入 SSH 子系统/SFTP 请求先经 `acl::authorize(device_id, op, path)`。
 2. 远程文件管理：规范化路径后强制校验 `realpath` 前缀命中白名单，且禁止符号链接逃逸（`O_NOFOLLOW` / 逐段校验）。
 3. 屏幕操作/共享：**每次会话需本端弹窗确认**（或预先授权且未勾选"每次确认"），会话期间被控端常驻可见指示（托盘/悬浮条），提供一键断开与权限即时回收。
-4. 权限变更即时生效：ACL 更新事件广播到所有活跃会话，被回收权限的会话立即终止。
-5. 敏感操作（删除、覆盖剪贴板、屏幕控制）记入本地审计日志（SQLite，含时间、设备、操作、路径、结果）。
+4. 权限变更即时生效：每次建立通道时实时读取信任库权限位（不做缓存），被回收权限的连接立即拒绝；`set_permissions` 先落盘再返回，失败回滚内存。
+5. 敏感操作（删除、覆盖剪贴板、屏幕控制、通知动作）记入本地审计日志；权限位变更追加写入 `<data_dir>/permissions.log`（时间、设备、旧掩码→新掩码、变更项，保留最近 500 行）。
 
 ---
 
@@ -638,10 +649,63 @@ SyncFolderGrant {
 | 敏感信息不明文存储 | §3.1、§7-11 |
 | 配置全部来自文件 | §6.3、§1.2 |
 | 核心与网络解耦 | §1.1、§6.1 |
+| 可自定义悬浮球（位置/大小/颜色/透明度/点击/长按/显隐规则） | §11.1 |
+| 跨设备通知流转（镜像、回唤、预设动作、去重） | §11.2 |
+| Shizuku 适配、状态检测、授权引导与降级 | §11.3 |
+| 逐设备逐权限开关、实时生效、可追溯 | §3.5、§11.4 |
 
 ---
 
-## 附录 A：v0.1 实现说明（M1 地基 + M2 配对/心跳 + M3 文件互传 + M4 剪贴板同步 + M5 屏幕共享 + M6 文件夹同步 + M7 同步完整版 + M8 Android 端）
+## 11. v0.3 新增能力（悬浮球 / 通知流转 / Shizuku / 细粒度权限）
+
+### 11.1 可自定义悬浮球（Android）
+
+实现：`FloatingBallService`（前台服务，`foregroundServiceType=specialUse`）+ `FloatingBallPrefs` + Compose 设置面板。
+
+- **位置**：拖动实时移动，松手后吸附到最近的左右边缘并记忆；纵坐标限制在状态栏下方与「屏幕高度 − 96dp」之间，避开底部手势导航区。
+- **大小 / 颜色 / 透明度**：40–88dp、5 种预设颜色、20%–100% 不透明度，变更即时刷新（`FloatingBallService.refresh`）。
+- **点击 / 双击 / 长按动作**：默认单击打开「功能轮盘」（扇区：同步剪贴板、打开连桥、启停同步服务、隐藏悬浮球，点击中心关闭）；双击默认执行快捷剪贴板同步（`QuickClipActivity` 透明前台窗口：读取剪贴板 → 推送已授权设备 → 提示后退出）；长按可选打开连桥、启停同步服务、隐藏悬浮球。动作在 `performClickAction` / `performDoubleClickAction` / `performLongPressAction` 中集中处理，旧配置按 `scheme=2` 迁移为新默认值。
+- **显示规则**：始终显示 / 仅同步服务运行时；支持按前台应用包名隐藏（依赖无障碍服务上报 `TYPE_WINDOW_STATE_CHANGED`，未启用无障碍时不隐藏）。
+- **权限与降级**：`SYSTEM_ALERT_WINDOW` 未授权时给出提示并跳转系统设置；服务创建/移除视图全程 `runCatching` 包裹，失败即停止服务并提示，不影响核心通道。
+
+Android 剪贴板改为自动获取（`ClipboardAutoSync`）：应用回到前台时自动读取当前剪贴板，内容变化（SHA-256 摘要比对）才推送；来自对端并已写入本机的文本会记录摘要，避免回环；读取失败（Android 10+ 后台限制）时界面明确提示而非静默跳过。界面不再要求手动输入文本。
+
+### 11.2 跨设备通知流转
+
+通道与协议（端口 45717，STS 双向认证 + AES-256-GCM）：
+
+| 消息 | 值 | 方向 | 说明 |
+|---|---|---|---|
+| `NotifyPush` | `0x71` | B→A | 通知字段（id/app/app_name/title/text/posted_at/priority） |
+| `NotifyAct` | `0x72` | A→B | 请求在来源设备执行预设动作 |
+| `NotifyOk` | `0x73` | 双向 | 成功/重复入站确认 |
+| `NotifyFail` | `0x74` | 双向 | 明确失败原因（无权限、后端不可用、被忽略等） |
+
+- **生成端（B）**：Android `NotificationListenerService` 过滤本应用、群组摘要、常驻与媒体通知，按 `key+postTime+标题/正文哈希` 去重后调用 `NotifyService::publish`；仅推送给「通知镜像」已授权、在线且有 IP 的设备。
+- **展示端（A）**：`NotifyService::serve` 校验权限位、忽略应用列表与入站去重（`peer|id|posted_at`），通过 `INotifyBackend::show` 展示系统通知；重复入站仅回 `NotifyOk`，不重复弹窗；后端缺失时回 `NotifyFail` 并发布 `NotifyMirrored(applied=false)`。
+- **回唤与动作**：点击镜像通知 → `MirrorActionReceiver` → `nativeNotifyAction` → A 向 B 发 `NotifyAct`；B 校验 `notify_action` 权限位、`action_mode` 与后端可用性，按 `peer|id` 做 3 秒幂等，可选人工确认，延时 `action_delay_ms` 后调用 `INotifyBackend::act`。`act` 先经 `LinkBridgeNotificationListener.fireOriginalIntent(id)` 唤起 B 的原始通知（复用监听侧缓存的 `contentIntent`，缓存上限 32 条），失败再降级为打开来源应用；配置为 `tap` 时在唤起后延时 500ms 再按预设坐标点击，保证界面已就绪。
+- **实时性与防漏触发**：通道独立线程与端口，失败不影响其他通道；动作模式只由来源设备按自身配置决定，不信任请求方传入模式；出站/入站/动作三层去重分别覆盖重试、重复监听回调与连点。
+
+配置（`[notify]`）：`enabled`、`dedupe_window_sec`、`max_text_bytes`、`action_mode`（open_app/tap/none）、`action_x/y`、`action_delay_ms`、`auto_action`、`ignore_apps`。
+
+### 11.3 Shizuku 支持模块
+
+- **适配方式**：`ShizukuBridge` 全程反射调用 `rikka.shizuku.Shizuku`，不引入额外 maven 依赖；未集成 API 的安装包不会崩溃。
+- **状态机**：`UNSUPPORTED`（安装包未集成 API）→ `NOT_INSTALLED` → `NOT_RUNNING` → `PERMISSION_REQUIRED` → `READY`。
+- **能力**：`newProcess(["input","tap",x,y])` 执行系统级点击；`tap()` 失败即返回 false，由 `NotifyBridge.performAction` 回退到无障碍注入，再失败则明确提示。
+- **引导与异常**：界面展示 `statusText`，提供「打开 Shizuku」「申请授权」按钮；未集成 API 时提示到 Shizuku 应用内手动授权，并说明自动降级路线；所有反射调用捕获 `Throwable` 并记录日志。
+
+### 11.4 细粒度设备权限管控
+
+- **数据模型**：`TrustRecord.permissions` 为 8 位掩码（见 §3.5），默认值含文件互传/剪贴板/屏幕共享/同步/通知镜像，不含屏幕控制与通知动作。
+- **变更路径**：CLI `linkbridge perms <设备> <权限> <on|off>`；Android `nativeSetPermissions(deviceId, mask)`；两者最终调用 `TrustStore::set_permissions`，先写磁盘（LBT6，失败回滚内存），成功后追加 `permissions.log`。
+- **实时生效**：各业务模块在建立连接时实时读取权限位，无缓存；关闭后新请求立即被拒绝。
+- **可视化**：Android 设备卡片逐项渲染开关（来自 `nativePermissionCatalogJson`），桌面 CLI 用 `perms` 打印总览/单项/审计日志。
+
+---
+
+## 附录 A：v0.1 实现说明（M1 地基 + M2 配对/心跳 + M3 文件互传 + M4 剪贴板同步 + M5 屏幕共享 + M6 文件夹同步 + M7 同步完整版 + M8 Android 端 + v0.3 悬浮球/通知流转/Shizuku/细粒度权限）
+
 
 本附录记录已落地代码与上文设计基线的差异，便于评审与后续升级。
 

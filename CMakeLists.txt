@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(LinkBridge VERSION 0.2.0 LANGUAGES CXX)
+project(LinkBridge VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -47,6 +47,7 @@ set(LB_CORE_SOURCES
   src/core/transfer/transfer.cpp
   src/core/clipboard/clipboard.cpp
   src/core/screen/screen.cpp
+  src/core/notify/notify.cpp
   src/core/sync/sync.cpp
   src/core/sync/version_store.cpp
   src/core/node/node.cpp
@@ -63,6 +64,7 @@ if(LB_PLATFORM STREQUAL "android")
     src/pal/android/android_clipboard.cpp
     src/pal/android/android_screen.cpp
     src/pal/android/android_input.cpp
+    src/pal/android/android_notify.cpp
     src/pal/android/android_watcher.cpp
     src/net/tcp_posix.cpp
   )
@@ -74,6 +76,7 @@ elseif(LB_PLATFORM STREQUAL "linux")
     src/pal/linux/secret_store.cpp
     src/pal/linux/x11_clipboard.cpp
     src/pal/linux/x11_screen.cpp
+    src/pal/linux/x11_notify.cpp
     src/pal/linux/inotify_watcher.cpp
     src/net/tcp_posix.cpp
   )
@@ -86,6 +89,7 @@ else()
     src/pal/windows/win_paths.cpp
     src/pal/windows/win_clipboard.cpp
     src/pal/windows/win_screen.cpp
+    src/pal/windows/win_notify.cpp
     src/pal/windows/win_watcher.cpp
     # 传输层（实现 ITransport/ISecureChannel，可被 Mock 替换）
     src/net/tcp.cpp
@@ -219,6 +223,7 @@ add_executable(lb_tests
   tests/test_transfer.cpp
   tests/test_clipboard.cpp
   tests/test_screen.cpp
+  tests/test_notify.cpp
   tests/test_sync.cpp
 )
 target_link_libraries(lb_tests PRIVATE lb_core)

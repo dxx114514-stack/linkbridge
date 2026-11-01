@@ -20,6 +20,7 @@ transfer_port = 45713
 clipboard_port = 45714
 screen_port = 45715
 sync_port = 45716
+notify_port = 45717
 bind_addr = "0.0.0.0"
 connect_timeout_ms = 5000
 
@@ -45,6 +46,17 @@ enabled = true
 require_confirm_each_session = true
 max_fps = 2
 max_bytes = 16777216
+
+[notify]
+enabled = true
+dedupe_window_sec = 20
+max_text_bytes = 4096
+action_mode = "open_app"
+action_x = 0
+action_y = 0
+action_delay_ms = 400
+auto_action = false
+ignore_apps = ""
 
 [sync]
 enabled = false
@@ -72,12 +84,13 @@ Result validate_config(const AppConfig& cfg) {
     if (!port_ok(cfg.network.clipboard_port)) return Result::fail("network.clipboard_port 非法");
     if (!port_ok(cfg.network.screen_port)) return Result::fail("network.screen_port 非法");
     if (!port_ok(cfg.network.sync_port)) return Result::fail("network.sync_port 非法");
+    if (!port_ok(cfg.network.notify_port)) return Result::fail("network.notify_port 非法");
     const int ports[] = {cfg.network.pair_port, cfg.network.heartbeat_port, cfg.network.ssh_port,
                          cfg.network.transfer_port, cfg.network.clipboard_port,
-                         cfg.network.screen_port, cfg.network.sync_port};
+                         cfg.network.screen_port, cfg.network.sync_port, cfg.network.notify_port};
     for (std::size_t i = 0; i < sizeof(ports) / sizeof(ports[0]); ++i)
         for (std::size_t j = i + 1; j < sizeof(ports) / sizeof(ports[0]); ++j)
-            if (ports[i] == ports[j]) return Result::fail("七个端口不得重复");
+            if (ports[i] == ports[j]) return Result::fail("八个端口不得重复");
 
     if (cfg.heartbeat.interval_sec < 5 || cfg.heartbeat.interval_sec > 3600)
         return Result::fail("heartbeat.interval_sec 需在 5..3600");
@@ -100,6 +113,19 @@ Result validate_config(const AppConfig& cfg) {
         return Result::fail("screen.max_fps 需在 1..30");
     if (cfg.screen.max_bytes < 1024 || cfg.screen.max_bytes > 67108864)
         return Result::fail("screen.max_bytes 需在 1024..67108864");
+
+    const auto& notify = cfg.notify;
+    if (notify.dedupe_window_sec < 1 || notify.dedupe_window_sec > 3600)
+        return Result::fail("notify.dedupe_window_sec 需在 1..3600");
+    if (notify.max_text_bytes < 128 || notify.max_text_bytes > 65536)
+        return Result::fail("notify.max_text_bytes 需在 128..65536");
+    if (notify.action_mode != "open_app" && notify.action_mode != "tap" &&
+        notify.action_mode != "none")
+        return Result::fail("notify.action_mode 仅支持 open_app | tap | none");
+    if (notify.action_delay_ms < 0 || notify.action_delay_ms > 10000)
+        return Result::fail("notify.action_delay_ms 需在 0..10000");
+    if (notify.action_mode == "tap" && (notify.action_x < 0 || notify.action_y < 0))
+        return Result::fail("notify.action_mode=tap 时必须配置非负的 action_x/action_y");
 
     const auto& sync = cfg.sync;
     if (sync.mode != "send_receive" && sync.mode != "send_only" &&
@@ -165,6 +191,8 @@ Expected<AppConfig> load_config(const std::string& path, bool* created_default) 
         cfg.network.screen_port = static_cast<int>(*v);
     if (auto v = t.get_int("network", "sync_port"))
         cfg.network.sync_port = static_cast<int>(*v);
+    if (auto v = t.get_int("network", "notify_port"))
+        cfg.network.notify_port = static_cast<int>(*v);
     if (auto v = t.get_str("network", "bind_addr")) cfg.network.bind_addr = *v;
     if (auto v = t.get_int("network", "connect_timeout_ms"))
         cfg.network.connect_timeout_ms = static_cast<int>(*v);
@@ -197,6 +225,19 @@ Expected<AppConfig> load_config(const std::string& path, bool* created_default) 
     if (auto v = t.get_int("screen", "max_fps")) cfg.screen.max_fps = static_cast<int>(*v);
     if (auto v = t.get_int("screen", "max_bytes"))
         cfg.screen.max_bytes = static_cast<int>(*v);
+
+    if (auto v = t.get_bool("notify", "enabled")) cfg.notify.enabled = *v;
+    if (auto v = t.get_int("notify", "dedupe_window_sec"))
+        cfg.notify.dedupe_window_sec = static_cast<int>(*v);
+    if (auto v = t.get_int("notify", "max_text_bytes"))
+        cfg.notify.max_text_bytes = static_cast<int>(*v);
+    if (auto v = t.get_str("notify", "action_mode")) cfg.notify.action_mode = *v;
+    if (auto v = t.get_int("notify", "action_x")) cfg.notify.action_x = static_cast<int>(*v);
+    if (auto v = t.get_int("notify", "action_y")) cfg.notify.action_y = static_cast<int>(*v);
+    if (auto v = t.get_int("notify", "action_delay_ms"))
+        cfg.notify.action_delay_ms = static_cast<int>(*v);
+    if (auto v = t.get_bool("notify", "auto_action")) cfg.notify.auto_action = *v;
+    if (auto v = t.get_str("notify", "ignore_apps")) cfg.notify.ignore_apps = *v;
 
     if (auto v = t.get_bool("sync", "enabled")) cfg.sync.enabled = *v;
     if (auto v = t.get_str("sync", "folder")) cfg.sync.folder = *v;
@@ -232,13 +273,16 @@ std::string config_summary(const AppConfig& cfg) {
        << "  传输端口: " << cfg.network.transfer_port
        << "  剪贴板端口: " << cfg.network.clipboard_port
        << "  屏幕共享端口: " << cfg.network.screen_port
-       << "  同步端口: " << cfg.network.sync_port << "\n"
+       << "  同步端口: " << cfg.network.sync_port
+       << "  通知镜像端口: " << cfg.network.notify_port << "\n"
        << "心跳: 基础 " << cfg.heartbeat.interval_sec << "s / 上限 " << cfg.heartbeat.max_interval_sec
        << "s / 失败阈值 " << cfg.heartbeat.max_failures
        << " / 自适应 " << (cfg.heartbeat.adaptive ? "开" : "关");
     if (cfg.sync.enabled) {
         os << "\n同步: 文件夹 " << cfg.sync.folder << " / 模式 " << cfg.sync.mode;
     }
+    os << "\n通知镜像: " << (cfg.notify.enabled ? "启用" : "停用") << " / 预设动作 "
+       << cfg.notify.action_mode;
     return os.str();
 }
 

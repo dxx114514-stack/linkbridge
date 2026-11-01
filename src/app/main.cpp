@@ -72,7 +72,7 @@ bool prompt_screen(const std::string& from_name, const std::string& mode) {
 }
 
 void print_banner() {
-    std::printf("LinkBridge 连桥 v0.1 (M1-M7: 身份/信任库/配对/心跳/文件互传/剪贴板/屏幕共享/文件夹同步完整版)\n");
+    std::printf("LinkBridge 连桥 v0.1 (M1-M8: 身份/信任库/配对/心跳/文件互传/剪贴板/屏幕共享/文件夹同步/通知镜像)\n");
     std::printf("------------------------------------------------------------\n");
 }
 
@@ -126,7 +126,11 @@ void print_usage() {
         "  sync resolve <路径> <keep_local|keep_remote|keep_both>  解决指定冲突\n"
         "  sync history [路径]   列出回收站中的历史版本\n"
         "  sync restore <路径> [版本ID]  恢复历史版本（省略版本ID 取最新，当前文件先归档）\n"
-        "  daemon            启动监听/心跳/剪贴板/屏幕共享/文件夹同步，持续运行\n"
+        "  perms [设备]      列出设备权限开关；指定设备时逐项显示\n"
+        "  perms <设备> <权限> <on|off>  单独开关某项权限（即时生效并写入审计日志）\n"
+        "  perms log         查看最近的权限变更审计日志\n"
+        "  notify status     显示通知镜像配置与通道端口\n"
+        "  daemon            启动监听/心跳/剪贴板/屏幕共享/文件夹同步/通知镜像，持续运行\n"
         "\n参数:\n"
         "  --data-dir DIR    数据目录（默认 %%LOCALAPPDATA%%\\LinkBridge）\n"
         "  --config FILE     配置文件（默认 <数据目录>\\linkbridge.toml）\n"
@@ -175,11 +179,13 @@ void print_trust_only(lb::Node& node) {
         std::printf("尚未添加受信任设备。\n");
         return;
     }
-    std::printf("%-18s %-14s %-10s %-20s %s\n", "设备名", "设备 ID", "平台", "最近 IP", "配对时间");
+    std::printf("%-18s %-14s %-10s %-20s %-14s %s\n", "设备名", "设备 ID", "平台", "最近 IP",
+                "配对时间", "权限掩码");
     for (const auto& r : records) {
-        std::printf("%-18s %-14s %-10s %-20s %lld\n", r.name.c_str(), r.device_id.c_str(),
+        std::printf("%-18s %-14s %-10s %-20s %lld  %s\n", r.name.c_str(), r.device_id.c_str(),
                     lb::platform_name(r.platform), r.last_ip.empty() ? "-" : r.last_ip.c_str(),
-                    static_cast<long long>(r.paired_at));
+                    static_cast<long long>(r.paired_at),
+                    lb::permission_mask_text(r.permissions).c_str());
     }
 }
 
@@ -400,6 +406,124 @@ int main(int argc, char** argv) {
 
     if (command == "devices") {
         print_trust_only(*node);
+        return 0;
+    }
+
+    if (command == "perms") {
+        if (positional.size() == 2 && positional[1] == "log") {
+            const auto lines = node->trust().permission_audit_log(200);
+            if (lines.empty()) {
+                std::printf("暂无权限变更记录。\n");
+                return 0;
+            }
+            std::printf("权限变更审计（最近 %zu 条，时间均为 UTC）:\n", lines.size());
+            for (const auto& line : lines) std::printf("  %s\n", line.c_str());
+            return 0;
+        }
+
+        const auto records = node->trust().all();
+        if (records.empty()) {
+            std::printf("尚未添加受信任设备。\n");
+            return 1;
+        }
+
+        if (positional.size() == 1) {
+            std::printf("设备权限总览（on=已授权，off=未授权）:\n");
+            for (const auto& r : records) {
+                std::printf("\n%s (%s)  掩码 %s\n", r.name.c_str(), r.device_id.c_str(),
+                            lb::permission_mask_text(r.permissions).c_str());
+                for (const auto& p : lb::permission_catalog()) {
+                    const bool on = (r.permissions & p.flag) != 0;
+                    std::printf("  %-16s %-3s %s\n", p.key, on ? "on" : "off", p.name);
+                }
+            }
+            return 0;
+        }
+
+        const auto peer = resolve_peer(*node, positional[1]);
+        if (!peer) {
+            std::printf("未找到受信任设备: %s（可用 devices 查看）\n", positional[1].c_str());
+            return 1;
+        }
+
+        if (positional.size() == 2) {
+            std::printf("%s (%s)  当前掩码 %s\n", peer->name.c_str(), peer->device_id.c_str(),
+                        lb::permission_mask_text(peer->permissions).c_str());
+            for (const auto& p : lb::permission_catalog()) {
+                const bool on = (peer->permissions & p.flag) != 0;
+                std::printf("  %-16s %-3s %-10s %s\n", p.key, on ? "on" : "off", p.name,
+                            p.description);
+            }
+            std::printf("\n提示: linkbridge perms %s <权限> <on|off>\n", peer->device_id.c_str());
+            return 0;
+        }
+
+        if (positional.size() < 4) {
+            std::printf("用法: linkbridge perms <设备> <权限> <on|off>\n");
+            return 2;
+        }
+        const std::string& key = positional[2];
+        std::string state = positional[3];
+        std::transform(state.begin(), state.end(), state.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (state != "on" && state != "off") {
+            std::printf("状态必须是 on 或 off，收到: %s\n", positional[3].c_str());
+            return 2;
+        }
+        const auto& catalog = lb::permission_catalog();
+        const lb::PermissionInfo* info = nullptr;
+        for (const auto& p : catalog)
+            if (key == p.key) {
+                info = &p;
+                break;
+            }
+        if (!info) {
+            std::printf("未知权限项: %s\n可用权限:\n", key.c_str());
+            for (const auto& p : catalog)
+                std::printf("  %-16s %s\n", p.key, p.name);
+            return 2;
+        }
+        std::uint32_t mask = peer->permissions;
+        if (state == "on")
+            mask |= info->flag;
+        else
+            mask &= ~info->flag;
+        if (mask == peer->permissions) {
+            std::printf("%s 的 %s 已是 %s，无需变更。\n", peer->name.c_str(), info->name,
+                        state.c_str());
+            return 0;
+        }
+        const lb::Result r = node->trust().set_permissions(peer->device_id, mask);
+        if (!r) {
+            std::printf("权限变更失败: %s\n", r.error.c_str());
+            return 1;
+        }
+        std::printf("已%s %s 的 %s（%s）\n  旧掩码 %s -> 新掩码 %s\n  变更已落盘并写入审计日志。\n",
+                    state == "on" ? "开启" : "关闭", peer->name.c_str(), info->name, info->key,
+                    lb::permission_mask_text(peer->permissions).c_str(),
+                    lb::permission_mask_text(mask).c_str());
+        return 0;
+    }
+
+    if (command == "notify") {
+        if (positional.size() < 2 || positional[1] != "status") {
+            std::printf("用法: linkbridge notify status\n");
+            return 2;
+        }
+        const lb::NotifyConfig& nc = node->config().notify;
+        std::printf("通知镜像配置:\n");
+        std::printf("  状态        : %s\n", nc.enabled ? "启用" : "停用");
+        std::printf("  去重窗口    : %d 秒\n", nc.dedupe_window_sec);
+        std::printf("  文本上限    : %d 字节\n", nc.max_text_bytes);
+        std::printf("  预设动作    : %s\n", nc.action_mode.c_str());
+        std::printf("  动作坐标    : (%d, %d)\n", nc.action_x, nc.action_y);
+        std::printf("  动作延时    : %d 毫秒\n", nc.action_delay_ms);
+        std::printf("  自动执行    : %s\n", nc.auto_action ? "是（无需确认）" : "否（每次确认）");
+        std::printf("  忽略应用    : %s\n",
+                    nc.ignore_apps.empty() ? "-" : nc.ignore_apps.c_str());
+        std::printf("  监听端口    : %d\n", node->notify_port());
+        std::printf("\n说明: 仅对已授权「通知镜像」的设备生效；执行预设动作需「通知动作」权限，\n"
+                    "      且 action_mode=none 时只弹通知不操作。\n");
         return 0;
     }
 

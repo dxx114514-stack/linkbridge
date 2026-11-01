@@ -30,6 +30,29 @@ object NativeBridge {
 
     @JvmStatic external fun nativePushClipboard(text: String): String
 
+    @JvmStatic
+    external fun nativeNotifyPublish(
+        id: String,
+        app: String,
+        appName: String,
+        title: String,
+        text: String,
+        postedAt: Long,
+    ): String
+    @JvmStatic
+    external fun nativeNotifyAction(
+        sourceDeviceId: String,
+        notificationId: String,
+        app: String,
+        appName: String,
+        title: String,
+    ): String
+    @JvmStatic external fun nativeSetNotifyEnabled(value: Boolean)
+
+    @JvmStatic external fun nativePermissionCatalogJson(): String
+    @JvmStatic external fun nativeSetPermissions(deviceId: String, mask: Long): String
+    @JvmStatic external fun nativeRemoveDevice(deviceId: String): String
+
     @JvmStatic external fun nativeRespondConfirm(id: Int, accept: Boolean)
     @JvmStatic external fun nativeSetAutoAccept(value: Boolean)
 

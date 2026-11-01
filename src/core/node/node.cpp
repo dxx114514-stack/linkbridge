@@ -65,6 +65,15 @@ Expected<std::unique_ptr<Node>> Node::create(const NodeOptions& options) {
                                                 node->events_, *node->dialer_,
                                                 node->config_.sync, options.data_dir);
 
+    std::shared_ptr<INotifyBackend> notify_backend =
+        options.notify_backend ? options.notify_backend : make_system_notify_backend();
+    node->notify_ = std::make_unique<NotifyService>(
+        *node->identity_, *node->trust_store_, node->events_, *node->dialer_,
+        node->config_.notify, notify_backend, node->config_.network.connect_timeout_ms);
+    node->notify_->set_presence_provider([raw](const DeviceId& id) {
+        return raw->heartbeat_->presence(id) == Presence::Online;
+    });
+
     return Expected<std::unique_ptr<Node>>::success(std::move(node));
 }
 
@@ -101,10 +110,16 @@ Result Node::start() {
     if (!sync_listener) return Result::fail("文件夹同步端口监听失败: " + sync_listener.error);
     sync_listen_ = std::move(*sync_listener);
 
+    auto notify_listener =
+        net::Listener::bind(config_.network.bind_addr, config_.network.notify_port);
+    if (!notify_listener) return Result::fail("通知镜像端口监听失败: " + notify_listener.error);
+    notify_listen_ = std::move(*notify_listener);
+
     // 监听实际端口可能由系统分配（配置为 0），据此更新通告端口与探测端口
     pairing_->set_advertised_ports(heartbeat_listen_->port(), config_.network.ssh_port,
                                    transfer_listen_->port(), clipboard_listen_->port(),
-                                   screen_listen_->port(), sync_listen_->port());
+                                   screen_listen_->port(), sync_listen_->port(),
+                                   notify_listen_->port());
     heartbeat_->set_port(heartbeat_listen_->port());
 
     running_.store(true);
@@ -114,10 +129,12 @@ Result Node::start() {
     clipboard_thread_ = std::thread([this] { accept_loop(Channel::Clipboard); });
     screen_thread_ = std::thread([this] { accept_loop(Channel::Screen); });
     sync_thread_ = std::thread([this] { accept_loop(Channel::Sync); });
+    notify_thread_ = std::thread([this] { accept_loop(Channel::Notify); });
     heartbeat_->start();
     clipboard_->start();
     screen_->start();
     sync_->start_auto();
+    notify_->start();
     return Result::ok();
 }
 
@@ -129,16 +146,19 @@ void Node::stop() {
     if (clipboard_listen_) clipboard_listen_->close();
     if (screen_listen_) screen_listen_->close();
     if (sync_listen_) sync_listen_->close();
+    if (notify_listen_) notify_listen_->close();
     if (pair_thread_.joinable()) pair_thread_.join();
     if (heartbeat_thread_.joinable()) heartbeat_thread_.join();
     if (transfer_thread_.joinable()) transfer_thread_.join();
     if (clipboard_thread_.joinable()) clipboard_thread_.join();
     if (screen_thread_.joinable()) screen_thread_.join();
     if (sync_thread_.joinable()) sync_thread_.join();
+    if (notify_thread_.joinable()) notify_thread_.join();
     heartbeat_->stop();
     clipboard_->stop();
     screen_->stop();
     sync_->stop_auto();
+    notify_->stop();
 
     // 等待处理线程结束（它们会在 socket 超时后自然退出）
     std::unique_lock<std::mutex> lk(handlers_mu_);
@@ -155,6 +175,7 @@ void Node::accept_loop(Channel channel) {
             case Channel::Clipboard: listener = clipboard_listen_.get(); break;
             case Channel::Screen: listener = screen_listen_.get(); break;
             case Channel::Sync: listener = sync_listen_.get(); break;
+            case Channel::Notify: listener = notify_listen_.get(); break;
         }
         if (!listener) return;
         auto accepted = listener->accept(300);
@@ -177,6 +198,7 @@ void Node::accept_loop(Channel channel) {
                 case Channel::Clipboard: clipboard_->serve(std::move(s)); break;
                 case Channel::Screen: screen_->serve(std::move(s)); break;
                 case Channel::Sync: sync_->serve(std::move(s)); break;
+                case Channel::Notify: notify_->serve(std::move(s)); break;
             }
             std::lock_guard<std::mutex> lk(handlers_mu_);
             --active_handlers_;
@@ -198,7 +220,8 @@ std::string Node::identity_summary() const {
        << "  传输端口: " << transfer_port()
        << "  剪贴板端口: " << clipboard_port()
        << "  屏幕共享端口: " << screen_port()
-       << "  文件夹同步端口: " << sync_port();
+       << "  文件夹同步端口: " << sync_port()
+       << "  通知镜像端口: " << notify_port();
     return os.str();
 }
 
