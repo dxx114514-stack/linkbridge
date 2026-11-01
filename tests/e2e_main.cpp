@@ -199,6 +199,7 @@ lb::AppConfig make_config(const char* name) {
     cfg.network.clipboard_port = 0;
     cfg.network.screen_port = 0;
     cfg.network.sync_port = 0;
+    cfg.network.notify_port = 0;
     cfg.network.connect_timeout_ms = 3000;
     cfg.heartbeat.interval_sec = 10;
     cfg.heartbeat.max_failures = 3;
