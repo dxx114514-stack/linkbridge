@@ -46,6 +46,30 @@ jobs:
           cp "$src/linkbridge" "dist/${name}/"
           if [ -f "$src/linkbridge-gui" ]; then cp "$src/linkbridge-gui" "dist/${name}/"; fi
           cp README.md "dist/${name}/"
+          cat > "dist/${name}/使用说明.txt" <<EOF
+LinkBridge 连桥 ${version}（Linux x86_64）
+
+一、命令行
+  ./linkbridge init         初始化身份与配置
+  ./linkbridge code         生成配对码并等待对端（默认 300 秒）
+  ./linkbridge pair <对端IP> <配对码>
+  ./linkbridge daemon       常驻服务（监听/心跳/剪贴板/同步/通知）
+  无参数运行 ./linkbridge 可查看全部命令；详见 README.md。
+
+二、图形界面（可选）
+  ./linkbridge-gui
+  需要系统已安装 wxWidgets 3.2 GTK3 运行库：
+    Ubuntu / Debian: sudo apt install libwxgtk3.2-1
+    Fedora:          sudo dnf install wxGTK3.2
+  若提示找不到共享库，安装后即可；只用命令行则无需该依赖。
+
+三、依赖与说明
+  - 构建环境 Ubuntu 24.04，glibc 2.39 及以上；依赖 libssl3。
+  - 首次运行会在 ~/.local/share/LinkBridge（或 XDG 数据目录）生成配置与身份。
+  - 请勿同时运行 GUI 与 daemon（两者都会监听 45710-45717）。
+  - 配对失败请检查：对端配对码是否有效、是否同一网段、防火墙是否放行 45710。
+EOF
+
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           ls -lh dist/
 
