@@ -1,0 +1,57 @@
+name: Package
+
+# 手动触发的发布产物打包：用于给 Release 补充可下载的二进制。
+# 目前覆盖 Linux；Windows 与 Android 可在本地构建（见 README）。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: 打包 Linux x86_64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libx11-dev libwxgtk3.2-dev
+
+      - name: 构建（含 GUI）
+        id: gui
+        continue-on-error: true
+        run: |
+          cmake -S . -B build-gui -DCMAKE_BUILD_TYPE=Release -DLB_BUILD_GUI=ON
+          cmake --build build-gui --parallel
+
+      - name: 构建（仅 CLI 兜底）
+        if: steps.gui.outcome != 'success'
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLB_BUILD_GUI=OFF
+          cmake --build build --parallel
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 'project(LinkBridge VERSION' CMakeLists.txt | sed -E 's/.*VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          src=build-gui
+          if [ ! -f "$src/linkbridge" ]; then src=build; fi
+          name="linkbridge-${version}-linux-x86_64"
+          mkdir -p "dist/${name}"
+          cp "$src/linkbridge" "dist/${name}/"
+          if [ -f "$src/linkbridge-gui" ]; then cp "$src/linkbridge-gui" "dist/${name}/"; fi
+          cp README.md "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          ls -lh dist/
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/*.tar.gz
+          if-no-files-found: error

@@ -8,6 +8,10 @@
 
 #include <chrono>
 
+#ifndef LB_VERSION
+#define LB_VERSION "dev"
+#endif
+
 namespace lb::gui {
 namespace {
 enum {
@@ -111,7 +115,8 @@ void MainFrame::build_menu() {
     Bind(wxEVT_MENU,
          [this](wxCommandEvent&) {
              wxMessageBox(
-                 W("LinkBridge 连桥 v0.1\n\n局域网内的跨设备协作：配对、文件互传、剪贴板同步、"
+                 W("LinkBridge 连桥 v" LB_VERSION
+                   "\n\n局域网内的跨设备协作：配对、文件互传、剪贴板同步、"
                    "文件夹同步与只读屏幕共享。\n\n核心库与命令行共用同一套协议与安全实现。"),
                  W("关于 LinkBridge"), wxOK | wxICON_INFORMATION, this);
          },

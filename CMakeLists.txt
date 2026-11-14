@@ -128,6 +128,7 @@ endif()
 # ---- 控制台前端 ----
 add_executable(linkbridge src/app/main.cpp)
 target_link_libraries(linkbridge PRIVATE lb_core)
+target_compile_definitions(linkbridge PRIVATE LB_VERSION="${PROJECT_VERSION}")
 
 # ---- 图形界面（wxWidgets 3.2：Win32 / GTK 原生控件）----
 option(LB_BUILD_GUI "Build the wxWidgets GUI frontend" ON)
@@ -199,6 +200,7 @@ if(LB_BUILD_GUI)
     src/gui/gui_panels_sync.cpp
   )
   target_link_libraries(linkbridge-gui PRIVATE lb_core lb_wx)
+  target_compile_definitions(linkbridge-gui PRIVATE LB_VERSION="${PROJECT_VERSION}")
   if(WIN32)
     enable_language(RC)
     target_sources(linkbridge-gui PRIVATE src/gui/linkbridge.rc)

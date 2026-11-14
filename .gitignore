@@ -42,6 +42,9 @@ debug.log
 /.deps/
 /build-gui/
 /.trae-html-share-packages/
+/dist/
+/dist-build-*/
+/.cache/
 
 # 编辑器
 .idea/

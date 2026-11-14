@@ -71,8 +71,13 @@ bool prompt_screen(const std::string& from_name, const std::string& mode) {
     return !line.empty() && (line[0] == 'y' || line[0] == 'Y');
 }
 
+#ifndef LB_VERSION
+#define LB_VERSION "dev"
+#endif
+
 void print_banner() {
-    std::printf("LinkBridge 连桥 v0.1 (M1-M8: 身份/信任库/配对/心跳/文件互传/剪贴板/屏幕共享/文件夹同步/通知镜像)\n");
+    std::printf("LinkBridge 连桥 v" LB_VERSION
+                " (M1-M8: 身份/信任库/配对/心跳/文件互传/剪贴板/屏幕共享/文件夹同步/通知镜像)\n");
     std::printf("------------------------------------------------------------\n");
 }
 
