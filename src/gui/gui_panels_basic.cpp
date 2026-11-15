@@ -1,6 +1,7 @@
 // 概览 / 设备 / 配对 三个面板。
 #include "gui/gui_panels.h"
 
+#include "core/platform/platform.h"
 #include "gui/gui_frame.h"
 #include "gui/gui_util.h"
 
@@ -329,8 +330,8 @@ void PairPanel::build_ui() {
     auto* codebox = new wxStaticBoxSizer(wxVERTICAL, this, W("本机作为响应方：生成配对码"));
     auto* hint = new wxStaticText(
         codebox->GetStaticBox(), wxID_ANY,
-        W("点击生成 6 位配对码，在 5 分钟内让对方输入该码发起配对。\n"
-          "本机 IP 可在 PowerShell 执行 ipconfig 查看（局域网内互通即可）。"));
+        W("点击生成 6 位配对码（5 分钟有效，最多 3 次尝试），让对方在下方「发起配对」中输入本机 IP 与该码。\n"
+          "生成后会显示本机局域网 IP，可直接告知对方。"));
     codebox->Add(hint, 0, wxEXPAND | wxALL, 8);
     auto* code_row = new wxBoxSizer(wxHORIZONTAL);
     gen_btn_ = new wxButton(codebox->GetStaticBox(), wxID_ANY, W("生成配对码"));
@@ -397,11 +398,12 @@ void PairPanel::on_generate() {
     const auto code = ctl_.generate_code(300);
     code_->SetLabel(W(code.value));
     expires_at_ = code.expires_at;
+    self_ip_ = pal::local_ip_for("8.8.8.8");
     countdown_.Start(1000);
     status_->SetLabel(W("配对码已生成，剩余 " + std::to_string(std::max<std::int64_t>(
                                                     0, expires_at_ - now_secs())) +
                         " 秒"));
-    frame_->append_log(W("已生成配对码（5 分钟有效，单次使用）"));
+    frame_->append_log(W("已生成配对码（5 分钟有效，最多 3 次尝试）"));
     tick_countdown();
 }
 
@@ -415,8 +417,11 @@ void PairPanel::tick_countdown() {
         status_->SetLabel(W("配对码已过期，请重新生成"));
         return;
     }
-    status_->SetLabel(W("配对码有效期剩余 " + std::to_string(left) + " 秒；" +
-                        "对端在「配对 - 发起配对」中输入该码"));
+    const std::string where =
+        self_ip_.empty() || self_ip_ == "127.0.0.1"
+            ? std::string("未检测到局域网地址，请确认已联网")
+            : "本机 IP " + self_ip_ + "，对端在「发起配对」中填入";
+    status_->SetLabel(W("配对码有效期剩余 " + std::to_string(left) + " 秒｜" + where));
 }
 
 void PairPanel::on_pair() {

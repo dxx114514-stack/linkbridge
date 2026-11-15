@@ -56,6 +56,8 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.net.Inet4Address
+import java.net.NetworkInterface
 
 class MainActivity : ComponentActivity() {
     private var accessibilityEnabled by mutableStateOf(false)
@@ -277,12 +279,22 @@ private fun LinkBridgeScreen(
                 ) { Text(if (pairing) "配对中…" else "向对端配对") }
             }
             if (pairCode.isNotBlank()) {
+                val localIp = remember { localIpv4() }
                 Card(Modifier.fillMaxWidth()) {
-                    Text(
-                        "本机配对码: $pairCode（5 分钟内有效，单次使用）",
-                        modifier = Modifier.padding(12.dp),
-                        style = MaterialTheme.typography.titleMedium,
-                    )
+                    Column(Modifier.padding(12.dp)) {
+                        Text(
+                            "本机配对码: $pairCode（5 分钟内有效，最多 3 次尝试）",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            if (localIp.isBlank()) {
+                                "未检测到局域网地址，请确认已连接 Wi-Fi"
+                            } else {
+                                "本机 IP: $localIp（在对端「向对端配对」中填入此 IP）"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                 }
             }
 
@@ -650,6 +662,21 @@ private fun LinkBridgeScreen(
                 }
             },
         )
+    }
+}
+
+/** 取本机局域网 IPv4（Wi-Fi 通常为 192.168 / 10 / 172 网段），显示在配对码旁，省去对端查 IP。 */
+private fun localIpv4(): String {
+    return try {
+        NetworkInterface.getNetworkInterfaces().toList()
+            .asSequence()
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { it.inetAddresses.toList().asSequence() }
+            .filterIsInstance<Inet4Address>()
+            .firstOrNull { it.isSiteLocalAddress }
+            ?.hostAddress.orEmpty()
+    } catch (e: Exception) {
+        ""
     }
 }
 

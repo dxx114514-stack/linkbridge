@@ -96,6 +96,7 @@ private:
     wxButton* pair_btn_ = nullptr;
     wxTimer countdown_;
     std::int64_t expires_at_ = 0;
+    std::string self_ip_;
     wxStaticText* auto_hint_ = nullptr;
 };
 
