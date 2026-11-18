@@ -20,6 +20,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -122,9 +123,25 @@ std::mutex g_confirm_mu;
 std::map<int, std::shared_ptr<ConfirmSlot>> g_pending;
 int g_next_confirm = 1;
 
+// 「总是允许」策略：按 kind 记录，命中后 request_confirm 直接放行，不再询问用户。
+// 状态保存在进程内，由 Kotlin 侧在启动时从 SharedPreferences 回填。
+std::mutex g_allow_mu;
+std::map<std::string, bool> g_auto_allow;
+
+bool auto_allowed(const std::string& kind) {
+    std::lock_guard<std::mutex> lk(g_allow_mu);
+    const auto it = g_auto_allow.find(kind);
+    return it != g_auto_allow.end() && it->second;
+}
+
 bool request_confirm(const std::string& kind, const std::string& name, const std::string& detail,
                      const std::string& fingerprint) {
     if (g_stopping.load()) return false;
+    if (auto_allowed(kind)) {
+        __android_log_print(ANDROID_LOG_INFO, kTag, "confirm auto-allowed: kind=%s peer=%s",
+                            kind.c_str(), name.c_str());
+        return true;
+    }
     auto slot = std::make_shared<ConfirmSlot>();
     int id = 0;
     {
@@ -180,6 +197,75 @@ void cancel_all_confirms() {
         slot->done = true;
         slot->accept = false;
         slot->cv.notify_all();
+    }
+}
+
+// ---- 实时屏幕流：后台线程持续拉帧，逐帧回传 Kotlin 渲染 ----
+
+struct ScreenStreamSession {
+    std::atomic<bool> stop{false};
+};
+
+std::mutex g_stream_mu;
+std::shared_ptr<ScreenStreamSession> g_stream;
+
+std::uint16_t dib_u16(const lb::ByteBuf& b, std::size_t off) {
+    return static_cast<std::uint16_t>(b[off] | (b[off + 1] << 8));
+}
+
+std::uint32_t dib_u32(const lb::ByteBuf& b, std::size_t off) {
+    return static_cast<std::uint32_t>(b[off]) | (static_cast<std::uint32_t>(b[off + 1]) << 8) |
+           (static_cast<std::uint32_t>(b[off + 2]) << 16) |
+           (static_cast<std::uint32_t>(b[off + 3]) << 24);
+}
+
+// DIB（BITMAPINFOHEADER 起始）→ ARGB int[]，按 2x 降采样控制 JNI 拷贝量
+void deliver_screen_frame(JNIEnv* e, std::uint64_t seq, int width, int height,
+                          const lb::ByteBuf& dib) {
+    constexpr std::size_t kHeader = 40;
+    if (width <= 0 || height <= 0 || dib.size() < kHeader) return;
+    const std::uint32_t header_size = dib_u32(dib, 0);
+    if (header_size < kHeader || dib.size() < header_size) return;
+    const std::int32_t raw_height = static_cast<std::int32_t>(dib_u32(dib, 8));
+    const std::uint16_t bpp = dib_u16(dib, 14);
+    if (bpp != 24 && bpp != 32) return;
+    const bool top_down = raw_height < 0;
+    const std::size_t row_size =
+        ((static_cast<std::size_t>(width) * bpp + 31) / 32) * 4;
+    if (header_size + row_size * static_cast<std::size_t>(height) > dib.size()) return;
+
+    const int out_w = std::max(1, width / 2);
+    const int out_h = std::max(1, height / 2);
+    std::vector<jint> pixels(static_cast<std::size_t>(out_w) * out_h);
+    const std::size_t step = bpp / 8;
+    for (int y = 0; y < out_h; ++y) {
+        const int src_y = std::min(height - 1, y * 2);
+        const std::size_t row = top_down ? static_cast<std::size_t>(src_y)
+                                         : static_cast<std::size_t>(height - 1 - src_y);
+        const std::size_t base = header_size + row * row_size;
+        for (int x = 0; x < out_w; ++x) {
+            const std::size_t p = base + static_cast<std::size_t>(x * 2) * step;
+            const jint b = dib[p];
+            const jint g = dib[p + 1];
+            const jint r = dib[p + 2];
+            pixels[static_cast<std::size_t>(y) * out_w + x] =
+                static_cast<jint>(0xFF000000u) | (r << 16) | (g << 8) | b;
+        }
+    }
+
+    jclass cls = lb::android::class_ref(kBridgeClass);
+    if (!cls) return;
+    const jmethodID fn = e->GetStaticMethodID(cls, "onScreenFrame", "([IIIJ)V");
+    if (!fn) {
+        e->ExceptionClear();
+        return;
+    }
+    jintArray arr = e->NewIntArray(static_cast<jsize>(pixels.size()));
+    if (arr) {
+        e->SetIntArrayRegion(arr, 0, static_cast<jsize>(pixels.size()), pixels.data());
+        e->CallStaticVoidMethod(cls, fn, arr, out_w, out_h, static_cast<jlong>(seq));
+        e->DeleteLocalRef(arr);
+        if (e->ExceptionCheck()) e->ExceptionClear();
     }
 }
 
@@ -451,6 +537,12 @@ std::string start_engine(const std::string& device_name) {
             return request_confirm("notify_action", from,
                                    msg.app_name + "：" + msg.title + "\n" + msg.text, "");
         });
+    node->transfer().set_accept_handler([](const std::string& file_name, std::uint64_t size) {
+        char detail[96];
+        std::snprintf(detail, sizeof(detail), "文件 %.1f MB",
+                      static_cast<double>(size) / (1024.0 * 1024.0));
+        return request_confirm("transfer", file_name, detail, "");
+    });
 
     if (auto r = node->start(); !r) {
         __android_log_print(ANDROID_LOG_ERROR, "lb_jni", "node->start failed: %s",
@@ -532,6 +624,14 @@ Java_com_linkbridge_app_NativeBridge_nativeStart(JNIEnv* e, jclass, jstring devi
 }
 
 JNIEXPORT void JNICALL Java_com_linkbridge_app_NativeBridge_nativeStop(JNIEnv*, jclass) {
+    {
+        // 先结束屏幕流，避免后台线程继续使用即将销毁的 Node
+        std::lock_guard<std::mutex> lk(g_stream_mu);
+        if (g_stream) {
+            g_stream->stop.store(true);
+            g_stream.reset();
+        }
+    }
     stop_engine();
 }
 
@@ -642,6 +742,60 @@ Java_com_linkbridge_app_NativeBridge_nativeSyncNow(JNIEnv* e, jclass, jstring pe
         .num("bytes", static_cast<long long>(stats.bytes))
         .num("skipped", static_cast<long long>(stats.skipped));
     return lb::android::to_jstring(e, j.done());
+}
+
+// 启动实时屏幕流：后台线程持续拉帧，经 onScreenFrame 回传；seconds 为会话上限
+JNIEXPORT jstring JNICALL Java_com_linkbridge_app_NativeBridge_nativeStartScreenStream(
+    JNIEnv* e, jclass, jstring peer, jint seconds) {
+    const auto node = snapshot();
+    if (!node || !node->running()) return lb::android::to_jstring(e, "服务未启动");
+    const auto record = resolve_peer(node, lb::android::to_string(e, peer));
+    if (!record) return lb::android::to_jstring(e, "未找到受信任设备");
+    if (record->last_ip.empty()) return lb::android::to_jstring(e, "尚未学习到对端 IP，请稍候");
+
+    auto session = std::make_shared<ScreenStreamSession>();
+    {
+        std::lock_guard<std::mutex> lk(g_stream_mu);
+        if (g_stream) g_stream->stop.store(true);
+        g_stream = session;
+    }
+    const int ms = std::clamp(static_cast<int>(seconds), 5, 3600) * 1000;
+    const std::string device = record->device_id;
+    std::thread([node, session, device, ms]() {
+        JNIEnv* env = lb::android::env();
+        const auto r = node->screen().view(
+            device, std::string(), ms, nullptr,
+            [env, session](std::uint64_t seq, int w, int h, const lb::ByteBuf& dib) {
+                {
+                    std::lock_guard<std::mutex> lk(g_stream_mu);
+                    if (g_stream.get() != session.get()) {
+                        session->stop.store(true);
+                        return;
+                    }
+                }
+                if (env) deliver_screen_frame(env, seq, w, h, dib);
+            },
+            &session->stop);
+        if (env) lb::android::release(env);
+
+        Json j;
+        j.str("type", "screen_stream_ended")
+            .num("frames", r ? static_cast<long long>(r->frames) : 0)
+            .str("reason", r ? std::string() : r.error);
+        emit(j.done());
+    }).detach();
+    return lb::android::to_jstring(e, "");
+}
+
+JNIEXPORT void JNICALL
+Java_com_linkbridge_app_NativeBridge_nativeStopScreenStream(JNIEnv*, jclass) {
+    std::shared_ptr<ScreenStreamSession> session;
+    {
+        std::lock_guard<std::mutex> lk(g_stream_mu);
+        session = g_stream;
+        g_stream.reset();
+    }
+    if (session) session->stop.store(true);
 }
 
 JNIEXPORT jstring JNICALL Java_com_linkbridge_app_NativeBridge_nativeStatusJson(JNIEnv* e, jclass) {
@@ -834,12 +988,18 @@ JNIEXPORT void JNICALL Java_com_linkbridge_app_NativeBridge_nativeRespondConfirm
 
 JNIEXPORT void JNICALL
 Java_com_linkbridge_app_NativeBridge_nativeSetAutoAccept(JNIEnv*, jclass, jboolean value) {
-    const auto node = snapshot();
-    if (!node) return;
     const bool v = value == JNI_TRUE;
-    node->pairing().set_auto_accept(v);
-    node->clipboard().set_auto_accept(v);
-    node->screen().set_auto_accept(v);
+    std::lock_guard<std::mutex> lk(g_allow_mu);
+    for (const char* kind : {"pairing", "clipboard", "screen", "notify_action"}) {
+        g_auto_allow[kind] = v;
+    }
+}
+
+JNIEXPORT void JNICALL Java_com_linkbridge_app_NativeBridge_nativeSetAutoAllow(
+    JNIEnv* e, jclass, jstring kind, jboolean value) {
+    const std::string k = lb::android::to_string(e, kind);
+    std::lock_guard<std::mutex> lk(g_allow_mu);
+    g_auto_allow[k] = value == JNI_TRUE;
 }
 
 } // extern "C"

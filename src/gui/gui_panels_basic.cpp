@@ -2,6 +2,7 @@
 #include "gui/gui_panels.h"
 
 #include "core/platform/platform.h"
+#include "core/trust/trust_store.h"
 #include "gui/gui_frame.h"
 #include "gui/gui_util.h"
 
@@ -191,6 +192,32 @@ void DevicesPanel::build_ui() {
     list_->AppendColumn(W("配对时间"), wxLIST_FORMAT_LEFT, 140);
     root->Add(list_, 1, wxEXPAND | wxLEFT | wxRIGHT, 10);
 
+    // 权限精细控制：按设备 × 按能力，勾选即生效
+    perm_box_ = new wxStaticBoxSizer(wxVERTICAL, this, W("权限（选中设备）"));
+    wxWindow* perm_parent = perm_box_->GetStaticBox();
+    perm_title_ = new wxStaticText(perm_parent, wxID_ANY,
+                                   W("选择设备后可逐项开启或关闭能力"));
+    perm_box_->Add(perm_title_, 0, wxLEFT | wxRIGHT | wxTOP, 8);
+    auto* perm_grid = new wxFlexGridSizer(0, 2, 6, 16);
+    for (const auto& p : permission_catalog()) {
+        auto* cb = new wxCheckBox(perm_parent, wxID_ANY, W(p.name));
+        cb->SetToolTip(W(p.description));
+        cb->Enable(false);
+        cb->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { on_permission_toggle(); });
+        perm_boxes_.push_back(cb);
+        perm_flags_.push_back(p.flag);
+        perm_grid->Add(cb, 0, wxALIGN_CENTER_VERTICAL);
+    }
+    perm_box_->Add(perm_grid, 0, wxLEFT | wxRIGHT | wxTOP, 8);
+    auto* perm_row = new wxBoxSizer(wxHORIZONTAL);
+    auto* audit_btn = new wxButton(perm_parent, wxID_ANY, W("查看审计日志"));
+    perm_row->Add(audit_btn, 0, wxRIGHT, 10);
+    perm_row->Add(new wxStaticText(perm_parent, wxID_ANY,
+                                   W("勾选即时生效并写入审计日志；关闭后对端的该类操作会被拒绝")),
+                  0, wxALIGN_CENTER_VERTICAL);
+    perm_box_->Add(perm_row, 0, wxALL, 8);
+    root->Add(perm_box_, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
+
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
     auto* refresh_btn = new wxButton(this, wxID_ANY, W("刷新"));
     auto* send_btn = new wxButton(this, wxID_ANY, W("发送文件…"));
@@ -210,6 +237,8 @@ void DevicesPanel::build_ui() {
     clip_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_push_clip(); });
     sync_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_sync(); });
     screen_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_screen(); });
+    audit_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { show_audit(); });
+    list_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { reload_permissions(); });
 }
 
 std::string DevicesPanel::selected_id() const {
@@ -248,6 +277,7 @@ void DevicesPanel::reload_list() {
     else
         hint_->SetLabel(W("共 ") + wxString::Format("%zu", records.size()) +
                         W(" 台受信任设备；选中后可发送文件、推送剪贴板、同步或查看屏幕。"));
+    reload_permissions();
 }
 
 void DevicesPanel::refresh(const UiSnapshot& snap) {
@@ -255,7 +285,8 @@ void DevicesPanel::refresh(const UiSnapshot& snap) {
 }
 
 void DevicesPanel::on_event(const UiEvent& ev) {
-    if (ev.type == "pairing_ok" || ev.type == "device_online" || ev.type == "device_offline")
+    if (ev.type == "pairing_ok" || ev.type == "device_online" ||
+        ev.type == "device_offline" || ev.type == "permissions_changed")
         reload_list();
 }
 
@@ -310,6 +341,66 @@ void DevicesPanel::on_screen() {
         return;
     }
     frame_->open_screen_for(id);
+}
+
+void DevicesPanel::reload_permissions() {
+    perm_loading_ = true;
+    const std::string id = selected_id();
+    perm_device_ = id;
+    bool found = false;
+    std::uint32_t mask = 0;
+    std::string label;
+    if (!id.empty()) {
+        for (const auto& r : ctl_.trust()) {
+            if (r.device_id != id) continue;
+            found = true;
+            mask = r.permissions;
+            label = r.name + "（" + id + "）  当前掩码 " + permission_mask_text(mask);
+            break;
+        }
+    }
+    if (!found) {
+        perm_title_->SetLabel(W("选择设备后可逐项开启或关闭能力"));
+        for (auto* cb : perm_boxes_) {
+            cb->SetValue(false);
+            cb->Enable(false);
+        }
+    } else {
+        perm_title_->SetLabel(W(label));
+        for (std::size_t i = 0; i < perm_boxes_.size(); ++i) {
+            perm_boxes_[i]->SetValue((mask & perm_flags_[i]) != 0);
+            perm_boxes_[i]->Enable(true);
+        }
+    }
+    perm_loading_ = false;
+    Layout();
+}
+
+void DevicesPanel::on_permission_toggle() {
+    if (perm_loading_ || perm_device_.empty()) return;
+    std::uint32_t mask = 0;
+    for (std::size_t i = 0; i < perm_boxes_.size(); ++i)
+        if (perm_boxes_[i]->GetValue()) mask |= perm_flags_[i];
+    ctl_.set_device_permissions(perm_device_, mask, [this](bool ok, const std::string& msg) {
+        frame_->append_log((ok ? W("权限已更新：") : W("权限更新失败：")) + W(msg));
+        reload_list();
+    });
+}
+
+void DevicesPanel::show_audit() {
+    const auto lines = ctl_.permission_audit(100);
+    wxString text;
+    for (const auto& line : lines) text += W(line) + "\n";
+    if (text.empty()) text = W("暂无权限变更记录。");
+
+    wxDialog dlg(this, wxID_ANY, W("权限审计日志"), wxDefaultPosition, wxSize(760, 420));
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+    auto* view = new wxTextCtrl(&dlg, wxID_ANY, text, wxDefaultPosition, wxDefaultSize,
+                                wxTE_MULTILINE | wxTE_READONLY);
+    sizer->Add(view, 1, wxEXPAND | wxALL, 10);
+    sizer->Add(dlg.CreateButtonSizer(wxOK), 0, wxALIGN_RIGHT | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+    dlg.SetSizer(sizer);
+    dlg.ShowModal();
 }
 
 // ---------------- 配对 ----------------

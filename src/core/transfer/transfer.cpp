@@ -132,6 +132,11 @@ TransferService::TransferService(const Identity& identity, TrustStore& trust, Ev
       config_(config),
       inbox_dir_(std::move(inbox_dir)) {}
 
+void TransferService::set_accept_handler(AcceptFn fn) {
+    std::lock_guard<std::mutex> lk(accept_mu_);
+    accept_ = std::move(fn);
+}
+
 void TransferService::publish_progress(const std::string& task_id, const std::string& name,
                                        std::uint64_t transferred, std::uint64_t total,
                                        bool outgoing) {
@@ -420,6 +425,20 @@ void TransferService::serve(std::unique_ptr<ByteStream> stream) {
         return;
     }
     name = *sane;
+
+    {
+        AcceptFn accept;
+        {
+            std::lock_guard<std::mutex> lk(accept_mu_);
+            accept = accept_;
+        }
+        if (accept && !accept(name, size)) {
+            send_msg(build_fail("接收方拒绝接收"));
+            publish_failed(task_id, name, "接收方拒绝接收", false);
+            stream->close();
+            return;
+        }
+    }
 
     if (auto r = pal::ensure_dir(inbox_dir_); !r) {
         send_msg(build_fail("接收目录不可用"));

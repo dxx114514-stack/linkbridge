@@ -62,6 +62,8 @@ class LinkBridgeService : Service() {
     override fun onCreate() {
         super.onCreate()
         LinkBridgeEngine.init(applicationContext)
+        // 服务可能在无界面情况下被拉起，同样需要回填「总是允许」策略
+        AutoAllowPrefs.applyAll(applicationContext)
         ensureChannel()
     }
 

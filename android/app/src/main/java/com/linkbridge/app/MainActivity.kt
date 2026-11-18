@@ -7,9 +7,11 @@ import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -50,18 +53,26 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
 import java.net.Inet4Address
 import java.net.NetworkInterface
 
 class MainActivity : ComponentActivity() {
     private var accessibilityEnabled by mutableStateOf(false)
     private var refreshTick by mutableIntStateOf(0)
+    private var pendingSendTo: String? = null
 
     private val projectionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -76,15 +87,65 @@ class MainActivity : ComponentActivity() {
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    private val storagePermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    // 发文件：系统选择器返回 content:// URI，核心需要本地路径，先复制到缓存再发送
+    private val pickFileLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            val target = pendingSendTo
+            pendingSendTo = null
+            if (uri == null || target == null) return@registerForActivityResult
+            lifecycleScope.launch {
+                LinkBridgeEngine.setMessage("正在发送文件…")
+                val result = withContext(Dispatchers.IO) {
+                    var tmp: File? = null
+                    try {
+                        val name = queryDisplayName(uri) ?: "shared.bin"
+                        val file = File(cacheDir, "send_${System.currentTimeMillis()}_$name")
+                        tmp = file
+                        contentResolver.openInputStream(uri)?.use { input ->
+                            file.outputStream().use { output -> input.copyTo(output) }
+                        } ?: return@withContext "发送失败: 无法读取所选文件"
+                        val error = LinkBridgeEngine.sendFile(target, file.absolutePath, name)
+                        if (error.isBlank()) "已发送 $name" else "发送失败: $error"
+                    } catch (e: Exception) {
+                        "发送失败: ${e.message}"
+                    } finally {
+                        tmp?.delete()
+                    }
+                }
+                LinkBridgeEngine.setMessage(result)
+            }
+        }
+
+    private fun queryDisplayName(uri: android.net.Uri): String? = try {
+        contentResolver
+            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null }
+    } catch (e: Exception) {
+        null
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         LinkBridgeEngine.init(applicationContext)
+        // 新进程启动时把已保存的「总是允许」策略回填给原生层
+        AutoAllowPrefs.applyAll(applicationContext)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        // Android 9 及以下：接收文件需要写公共「下载」目录
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
 
         setContent {
@@ -95,6 +156,10 @@ class MainActivity : ComponentActivity() {
                     onShareScreen = ::requestScreenShare,
                     onOpenAccessibility = { InputBridge.openSettings(this) },
                     onRefreshAccessibility = { accessibilityEnabled = InputBridge.isEnabled(this) },
+                    onPickFile = { id ->
+                        pendingSendTo = id
+                        pickFileLauncher.launch(arrayOf("*/*"))
+                    },
                 )
             }
         }
@@ -124,6 +189,7 @@ private fun LinkBridgeScreen(
     onShareScreen: () -> Unit,
     onOpenAccessibility: () -> Unit,
     onRefreshAccessibility: () -> Unit,
+    onPickFile: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -135,6 +201,7 @@ private fun LinkBridgeScreen(
     val catalog by LinkBridgeEngine.permissionCatalog.collectAsState()
     val message by LinkBridgeEngine.message.collectAsState()
     val confirm by LinkBridgeEngine.confirmRequest.collectAsState()
+    val screenFrame by LinkBridgeEngine.screenFrame.collectAsState()
 
     var ip by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
@@ -348,15 +415,39 @@ private fun LinkBridgeScreen(
                                 )
                             }
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            val deviceId = device.optString("device_id")
+                            TextButton(onClick = { onPickFile(deviceId) }) { Text("发文件…") }
                             TextButton(onClick = {
                                 scope.launch {
-                                    val error = LinkBridgeEngine.syncNow(device.optString("device_id"))
-                                    LinkBridgeEngine.setMessage(
-                                        if (error.isBlank()) "同步完成" else "同步失败: $error",
-                                    )
+                                    val raw = LinkBridgeEngine.syncNow(deviceId)
+                                    if (raw.trimStart().startsWith("{")) {
+                                        val stats = JSONObject(raw)
+                                        LinkBridgeEngine.setMessage(
+                                            "同步完成：推送 ${stats.optInt("pushed")}，" +
+                                                "拉取 ${stats.optInt("pulled")}，" +
+                                                "冲突 ${stats.optInt("conflicts")}",
+                                        )
+                                    } else {
+                                        LinkBridgeEngine.setMessage("同步失败: $raw")
+                                    }
                                 }
                             }) { Text("立即同步") }
+                            TextButton(onClick = {
+                                scope.launch {
+                                    if (!ensureServiceRunning(context)) {
+                                        LinkBridgeEngine.setMessage("服务未启动，未能开始查看屏幕")
+                                        return@launch
+                                    }
+                                    LinkBridgeEngine.setMessage("正在连接对端屏幕…")
+                                    val error = LinkBridgeEngine.startScreenStream(deviceId, 600)
+                                    if (error.isNotBlank()) {
+                                        LinkBridgeEngine.setMessage("查看屏幕失败: $error")
+                                    }
+                                }
+                            }) { Text("查看屏幕") }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             TextButton(
                                 onClick = { pendingRemove = device },
                                 colors = ButtonDefaults.textButtonColors(
@@ -365,6 +456,40 @@ private fun LinkBridgeScreen(
                             ) { Text("移除设备") }
                         }
                     }
+                }
+            }
+
+            Text("确认策略（总是允许）", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "开启后该功能不再弹窗询问，直接允许；仅对已配对设备生效，涉及隐私的能力建议保持关闭。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            AutoAllowPrefs.ALL.forEach { kind ->
+                val allowState = remember(kind) {
+                    mutableStateOf(AutoAllowPrefs.isEnabled(context, kind))
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(AutoAllowPrefs.title(kind), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            AutoAllowPrefs.description(kind),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Switch(
+                        checked = allowState.value,
+                        onCheckedChange = { on ->
+                            allowState.value = on
+                            AutoAllowPrefs.setEnabled(context, kind, on)
+                            LinkBridgeEngine.setMessage(
+                                if (on) {
+                                    "已开启「${AutoAllowPrefs.title(kind)}」：该功能不再弹窗确认"
+                                } else {
+                                    "已关闭「${AutoAllowPrefs.title(kind)}」：恢复逐次确认"
+                                },
+                            )
+                        },
+                    )
                 }
             }
 
@@ -606,6 +731,37 @@ private fun LinkBridgeScreen(
         }
     }
 
+    screenFrame?.let { frame ->
+        Dialog(onDismissRequest = { LinkBridgeEngine.stopScreenStream() }) {
+            Card(Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("对端屏幕（实时）", style = MaterialTheme.typography.titleMedium)
+                    Text("第 ${frame.seq} 帧", style = MaterialTheme.typography.bodySmall)
+                    Image(
+                        bitmap = frame.bitmap.asImageBitmap(),
+                        contentDescription = "对端屏幕实时画面",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 440.dp),
+                        contentScale = ContentScale.Fit,
+                    )
+                    Text(
+                        "画面来自对端实时采集；关闭窗口即停止查看。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = { LinkBridgeEngine.stopScreenStream() }) {
+                            Text("停止查看")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pendingRemove?.let { device ->
         AlertDialog(
             onDismissRequest = { pendingRemove = null },
@@ -637,7 +793,12 @@ private fun LinkBridgeScreen(
     confirm?.let { request ->
         AlertDialog(
             onDismissRequest = { LinkBridgeEngine.respondConfirm(request.optInt("id"), false) },
-            title = { Text("来自 ${request.optString("name")} 的请求") },
+            title = {
+                Text(
+                    if (request.optString("kind") == "transfer") "接收文件请求"
+                    else "来自 ${request.optString("name")} 的请求",
+                )
+            },
             text = {
                 Text(
                     when (request.optString("kind")) {
@@ -647,6 +808,8 @@ private fun LinkBridgeScreen(
                             "对方请求控制你的屏幕（可注入触摸与按键）"
                         else "对方请求只读查看你的屏幕"
                         "notify_action" -> "对端请求在本机执行通知预设动作\n${request.optString("detail")}"
+                        "transfer" -> "文件：${request.optString("name")}\n" +
+                            "${request.optString("detail")}\n接收后保存到「下载/LinkBridge」"
                         else -> request.optString("detail")
                     },
                 )

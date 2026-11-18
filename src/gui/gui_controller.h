@@ -103,6 +103,10 @@ public:
     std::vector<lb::VersionInfo> history(const std::string& path) const;
     void restore_version(const std::string& path, const std::string& version_id, DoneFn done);
 
+    // 按设备设置权限掩码：即时生效并写入审计日志
+    void set_device_permissions(const std::string& device_id, std::uint32_t mask, DoneFn done);
+    std::vector<std::string> permission_audit(std::size_t max_lines) const;
+
     lb::PairCode generate_code(int ttl_sec);
     std::string pairing_state_text() const;
 

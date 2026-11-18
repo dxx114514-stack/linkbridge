@@ -69,10 +69,21 @@ private:
     void on_sync();
     void on_screen();
     void on_remove();
+    void reload_permissions();
+    void on_permission_toggle();
+    void show_audit();
 
     wxListCtrl* list_ = nullptr;
     wxStaticText* hint_ = nullptr;
     std::vector<std::string> row_ids_;
+
+    // 按设备 × 按能力的权限控制
+    wxStaticBoxSizer* perm_box_ = nullptr;
+    wxStaticText* perm_title_ = nullptr;
+    std::vector<wxCheckBox*> perm_boxes_;
+    std::vector<std::uint32_t> perm_flags_;
+    std::string perm_device_;
+    bool perm_loading_ = false;
 };
 
 class PairPanel : public PanelBase {

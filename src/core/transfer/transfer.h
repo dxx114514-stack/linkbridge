@@ -9,6 +9,7 @@
 #include "core/identity/identity.h"
 #include "core/trust/trust_store.h"
 
+#include <functional>
 #include <mutex>
 #include <set>
 #include <string>
@@ -50,6 +51,10 @@ public:
     // 响应方：处理一条已建立的入站连接（由监听线程调用）。
     void serve(std::unique_ptr<ByteStream> stream);
 
+    // 接收前的确认回调：返回 false 表示拒绝本次传输。未设置时自动接收。
+    using AcceptFn = std::function<bool(const std::string& file_name, std::uint64_t size)>;
+    void set_accept_handler(AcceptFn fn);
+
     const std::string& inbox_dir() const { return inbox_dir_; }
 
     // 纯函数：拒绝路径分隔符、控制字符、Windows 保留名、超长名
@@ -78,6 +83,9 @@ private:
 
     std::mutex inbox_mu_;
     std::set<std::string> active_temps_;
+
+    std::mutex accept_mu_;
+    AcceptFn accept_;
 };
 
 } // namespace lb

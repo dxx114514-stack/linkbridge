@@ -365,7 +365,9 @@ void ScreenService::serve(std::unique_ptr<ByteStream> stream) {
 
 Expected<ScreenViewResult> ScreenService::view(const DeviceId& peer,
                                               const std::string& output_dir,
-                                              int duration_ms, ScreenInputQueue* input) {
+                                              int duration_ms, ScreenInputQueue* input,
+                                              ScreenFrameFn on_frame,
+                                              const std::atomic<bool>* stop) {
     const auto record = trust_.get(peer);
     if (!record) return Expected<ScreenViewResult>::fail("目标设备不在信任库中");
     if ((record->permissions & kPermScreenShare) == 0)
@@ -424,11 +426,15 @@ Expected<ScreenViewResult> ScreenService::view(const DeviceId& peer,
         token = note;
     }
 
-    if (auto r = pal::ensure_dir(output_dir); !r) {
-        stream->close();
-        return Expected<ScreenViewResult>::fail("创建输出目录失败: " + r.error);
+    const bool write_bmp = !output_dir.empty();
+    if (write_bmp) {
+        if (auto r = pal::ensure_dir(output_dir); !r) {
+            stream->close();
+            return Expected<ScreenViewResult>::fail("创建输出目录失败: " + r.error);
+        }
     }
-    const std::string bmp_path = pal::join_path(output_dir, "latest.bmp");
+    const std::string bmp_path =
+        write_bmp ? pal::join_path(output_dir, "latest.bmp") : std::string();
 
     ScreenViewResult stats;
     const int fps = std::max(1, config_.max_fps);
@@ -436,6 +442,7 @@ Expected<ScreenViewResult> ScreenService::view(const DeviceId& peer,
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration_ms);
 
     while (std::chrono::steady_clock::now() < deadline) {
+        if (stop && stop->load()) break;
         if (input) {
             ScreenInput event;
             while (input->pop(event)) {
@@ -504,19 +511,22 @@ Expected<ScreenViewResult> ScreenService::view(const DeviceId& peer,
             }
         }
 
-        const ByteBuf bmp = dib_to_bmp(data);
-        if (bmp.empty()) {
-            stream->close();
-            return Expected<ScreenViewResult>::fail("DIB 转 BMP 失败");
+        if (write_bmp) {
+            const ByteBuf bmp = dib_to_bmp(data);
+            if (bmp.empty()) {
+                stream->close();
+                return Expected<ScreenViewResult>::fail("DIB 转 BMP 失败");
+            }
+            if (auto w = pal::write_file_atomic(bmp_path, bmp); !w) {
+                stream->close();
+                return Expected<ScreenViewResult>::fail("写入帧文件失败: " + w.error);
+            }
+            stats.last_frame_path = bmp_path;
         }
-        if (auto w = pal::write_file_atomic(bmp_path, bmp); !w) {
-            stream->close();
-            return Expected<ScreenViewResult>::fail("写入帧文件失败: " + w.error);
-        }
+        if (on_frame) on_frame(frame_seq, width, height, data);
 
         ++stats.frames;
         stats.bytes += data.size();
-        stats.last_frame_path = bmp_path;
         events_.publish(ScreenFrameReceived{peer, frame_seq, width, height,
                                             static_cast<std::uint64_t>(data.size())});
 

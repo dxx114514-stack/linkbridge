@@ -23,6 +23,17 @@ object NativeBridge {
 
     @JvmStatic external fun nativeSendFile(peer: String, path: String, remoteName: String): String
     @JvmStatic external fun nativeSyncNow(peer: String): String
+
+    /** 实时屏幕流：启动后逐帧回调 [onScreenFrame]，直到停止或超时。 */
+    @JvmStatic
+    external fun nativeStartScreenStream(peer: String, seconds: Int): String
+    @JvmStatic external fun nativeStopScreenStream()
+
+    /** C++ 逐帧回调入口（后台线程）。 */
+    @JvmStatic
+    fun onScreenFrame(pixels: IntArray, width: Int, height: Int, seq: Long) {
+        LinkBridgeEngine.onScreenFrame(pixels, width, height, seq)
+    }
     @JvmStatic external fun nativeConflictsJson(): String
     @JvmStatic external fun nativeResolveConflict(path: String, action: String): String
     @JvmStatic external fun nativeHistoryJson(path: String): String
@@ -55,6 +66,9 @@ object NativeBridge {
 
     @JvmStatic external fun nativeRespondConfirm(id: Int, accept: Boolean)
     @JvmStatic external fun nativeSetAutoAccept(value: Boolean)
+
+    /** 单项「总是允许」：kind 取 AutoAllowPrefs 中的常量。 */
+    @JvmStatic external fun nativeSetAutoAllow(kind: String, value: Boolean)
 
     /** C++ 事件回调入口（JSON 文本）。 */
     @JvmStatic

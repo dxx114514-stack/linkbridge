@@ -515,6 +515,26 @@ void Controller::resolve_conflict(const std::string& path, const std::string& ac
     });
 }
 
+void Controller::set_device_permissions(const std::string& device_id, std::uint32_t mask,
+                                        DoneFn done) {
+    if (!node_) {
+        notify_done(done, false, "服务未启动");
+        return;
+    }
+    run_async([this, device_id, mask, done] {
+        const Result r = node_->trust().set_permissions(device_id, mask);
+        if (r.success) {
+            emit(UiEvent{"permissions_changed", device_id, permission_mask_text(mask), 0, 0,
+                         false});
+        }
+        notify_done(done, r.success, r.success ? "权限已更新" : r.error);
+    });
+}
+
+std::vector<std::string> Controller::permission_audit(std::size_t max_lines) const {
+    return node_ ? node_->trust().permission_audit_log(max_lines) : std::vector<std::string>{};
+}
+
 std::vector<VersionInfo> Controller::history(const std::string& path) const {
     return node_ ? node_->sync().history(path) : std::vector<VersionInfo>{};
 }

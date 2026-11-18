@@ -68,6 +68,10 @@ private:
     std::deque<ScreenInput> items_;
 };
 
+// 实时帧回调：dib 为原始 DIB（回调期间有效），seq 单调递增
+using ScreenFrameFn =
+    std::function<void(std::uint64_t seq, int width, int height, const ByteBuf& dib)>;
+
 class ScreenService {
 public:
     ScreenService(const Identity& identity, TrustStore& trust, EventBus& events,
@@ -79,10 +83,13 @@ public:
     // 被查看端：由监听线程调用，处理一条已建立的入站连接
     void serve(std::unique_ptr<ByteStream> stream);
 
-    // 查看端：阻塞拉取 duration_ms 的桌面帧，期间将最新帧写为 BMP。
-    // input 非空时以 control 模式建立会话，并在循环中发送队列内的输入事件。
+    // 查看端：阻塞拉取 duration_ms 的桌面帧。
+    // output_dir 非空时把最新帧写为 BMP；on_frame 非空时每帧回调（实时流模式）。
+    // stop 置 true 可提前结束会话。
     Expected<ScreenViewResult> view(const DeviceId& peer, const std::string& output_dir,
-                                    int duration_ms, ScreenInputQueue* input = nullptr);
+                                    int duration_ms, ScreenInputQueue* input = nullptr,
+                                    ScreenFrameFn on_frame = nullptr,
+                                    const std::atomic<bool>* stop = nullptr);
 
     void start();
     void stop();
